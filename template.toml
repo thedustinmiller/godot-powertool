@@ -1,0 +1,7 @@
+# Template configuration — versions used by `cargo xtask setup`
+[versions]
+godot = "4.6.1"
+gut = "9.6.0"
+mcp = "0.1.0"
+skill = "0.1.0"
+docs = "4.6.1"

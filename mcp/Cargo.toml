@@ -1,0 +1,17 @@
+[package]
+name = "powertool-mcp"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+powertool-common.workspace = true
+rmcp.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+base64.workspace = true
+schemars = "1.2"

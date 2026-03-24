@@ -1,0 +1,109 @@
+# =============================================================================
+# Rust
+# =============================================================================
+/target/
+Cargo.lock
+
+# =============================================================================
+# Godot
+# =============================================================================
+# Godot-specific ignores
+.godot/
+
+# Exported builds
+/godot/export/
+/godot/*.exe
+/godot/*.x86_64
+/godot/*.dmg
+/godot/*.apk
+/godot/*.aab
+
+# =============================================================================
+# GDExtension
+# =============================================================================
+# Compiled extension binaries (built from source)
+/godot/addons/extension/bin/linux/
+/godot/addons/extension/bin/windows/
+/godot/addons/extension/bin/macos/
+/godot/addons/extension/bin/web/
+
+# =============================================================================
+# Downloaded Tools
+# =============================================================================
+# Godot binary (downloaded by setup)
+/tools/godot/
+
+# GUT plugin (downloaded by setup)
+/godot/addons/gut/
+
+# =============================================================================
+# IDE / Editor
+# =============================================================================
+# VSCode
+.vscode/
+
+# IntelliJ / CLion
+.idea/
+*.iml
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# =============================================================================
+# OS
+# =============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# =============================================================================
+# Web Frontend (optional - run `cargo xtask web setup` to enable)
+# =============================================================================
+# Node modules
+web/node_modules/
+
+# Lock files (regenerated on npm install)
+web/package-lock.json
+web/pnpm-lock.yaml
+web/yarn.lock
+
+# Build output
+web/dist/
+
+# Playwright
+web/test-results/
+web/playwright-report/
+web/.playwright/
+
+# Exported Godot game files (produced by `cargo xtask web export`)
+web/public/godot.*
+web/public/extension.*
+
+# =============================================================================
+# AI / Claude Code
+# =============================================================================
+.claude/
+doc_api/
+
+# =============================================================================
+# Misc
+# =============================================================================
+*.log
+*.bak
+*.tmp

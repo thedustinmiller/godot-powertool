@@ -1,0 +1,76 @@
+[workspace]
+# To enable the Rust GDExtension, uncomment the line below and comment out the current one.
+# See "Enabling the Rust GDExtension" in README.md for full instructions.
+members = ["common", "xtask", "mcp", "docs"]
+# members = ["common", "extension", "xtask", "mcp", "docs"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT OR Apache-2.0"
+repository = ""
+
+[workspace.dependencies]
+# Internal
+powertool-common = { path = "common" }
+
+# Godot GDExtension
+godot = { git = "https://github.com/godot-rust/gdext", rev = "7937a0bd02b8d52505a058a1c8494d4466db3059" }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Logging / tracing
+log = "0.4"
+env_logger = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# MCP
+rmcp = { version = "1", features = ["server", "transport-io"] }
+
+# XML / doc generation
+quick-xml = "0.37"
+regex = "1"
+walkdir = "2"
+
+# Networking / downloads
+reqwest = { version = "0.12", features = ["blocking"] }
+
+# Archive handling
+zip = "2.2"
+tar = "0.4"
+flate2 = "1.0"
+
+# CLI UX
+indicatif = "0.17"
+
+# Platform utilities
+which = "7.0"
+dirs-next = "2.0"
+base64 = "0.22"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.dev]
+opt-level = 1
+debug = true

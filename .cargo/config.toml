@@ -1,0 +1,14 @@
+[alias]
+xtask = "run --package xtask --release --"
+x = "xtask"
+
+check-all = "check --workspace --all-targets"
+lint = "clippy --workspace --all-targets -- -D warnings"
+docs = "doc --workspace --no-deps --open"
+
+[build]
+incremental = true
+
+[target.wasm32-unknown-emscripten]
+linker = "emcc"
+ar = "emar"

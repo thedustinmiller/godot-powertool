@@ -1,0 +1,172 @@
+# Godot Powertool
+
+Unified template, Rust GDExtension, docs tool, and MCP/Skill bundle. 
+
+## Quick Start
+
+```bash
+# Setup; download Godot and GUT testing addon
+cargo xtask setup
+
+# Open Godot editor
+cargo xtask editor
+
+# Run the application
+cargo xtask run
+
+# Run tests
+cargo xtask test
+```
+
+## Workspace
+
+| Crate | Type | Purpose                                                                 |
+|-------|------|-------------------------------------------------------------------------|
+| `common` | lib | Shared platform detection, Godot CLI wrappers, config, project scanning |
+| `xtask` | bin | Convenience scripts for humans (`cargo xtask <command>`)                |
+| `mcp` | bin | MCP server for AI agents (15 tools over stdio)                          |
+| `docs` | bin | Godot docs -> markdown generator                                        |
+
+
+| Directory | Purpose                                               |
+|-----------|-------------------------------------------------------|
+| `godot/` | Godot 4.6 project template (scenes, scripts, tests)   |
+| `extension/` | Optional Rust GDExtension (disabled by default)       |
+| `web/` | Optional Vite frontend + Playwright tests             |
+| `skill/` | Agent knowledge base (GDScript ref, quirks, patterns) |
+| `scripts/` | GDScript helpers (MCP operations, screenshot capture) |
+
+## Configuration
+
+All versions are managed in `template.toml`:
+
+```toml
+[versions]
+godot = "4.6.1"
+gut = "9.6.0"
+mcp = "0.1.0"
+skill = "0.1.0"
+docs = "4.6.1"
+```
+
+## CLI Reference
+
+```bash
+cargo xtask setup              # Download Godot + GUT, initialize project
+cargo xtask build              # Build Rust GDExtension (if enabled)
+cargo xtask run                # Run the game
+cargo xtask editor             # Open Godot editor
+cargo xtask dev                # Build + run
+cargo xtask test               # Run all tests (Rust + GUT)
+cargo xtask doctor             # Check project health
+cargo xtask fmt                # Format Rust code
+cargo xtask lint               # Run clippy
+cargo xtask ci                 # fmt + lint + test
+
+# Web (optional)
+cargo xtask web setup          # Check prerequisites
+cargo xtask web export         # Export Godot project for web
+cargo xtask web dev            # Vite dev server on :3000
+cargo xtask web test           # Playwright tests
+
+# Agent tooling
+cargo xtask skill install      # Install skill files for Claude Code
+cargo xtask skill install -t codex    # ...or Codex CLI
+cargo xtask skill install -t generic  # ...or generic skills/ dir
+cargo xtask skill install -t /custom/path
+cargo xtask skill update       # Regenerate + reinstall
+cargo xtask skill remove       # Remove installed skill files
+
+cargo xtask mcp run            # Launch MCP server on stdio
+cargo xtask mcp install claude # Print setup instructions for Claude Code
+cargo xtask mcp install cursor # Print config for Cursor
+```
+
+## MCP Server
+
+The MCP server exposes 15 tools for AI agents to interact with Godot:
+
+| Tool | Description |
+|------|-------------|
+| `get_godot_version` | Get installed Godot version |
+| `launch_editor` | Open the Godot editor |
+| `run_project` | Run a project in debug mode |
+| `get_debug_output` | Read stdout/stderr from running project |
+| `stop_project` | Stop the running project |
+| `list_projects` | Find Godot projects in a directory |
+| `get_project_info` | Get project metadata (scenes, scripts, etc.) |
+| `create_scene` | Create a new scene file |
+| `add_node` | Add a node to an existing scene |
+| `load_sprite` | Load a texture into a sprite node |
+| `save_scene` | Save scene changes |
+| `export_mesh_library` | Export 3D scene as MeshLibrary |
+| `get_uid` / `update_project_uids` | UID management (Godot 4.4+) |
+| `take_screenshot` | Capture viewport screenshot (requires ScreenshotManager autoload) |
+
+### Setup
+
+```bash
+# Build the server
+cargo build -p powertool-mcp --release
+
+# Add to Claude Code
+claude mcp add godot -- ./target/release/powertool-mcp
+
+# Or set GODOT_PATH if Godot isn't on your PATH
+GODOT_PATH=/path/to/godot claude mcp add godot -- ./target/release/powertool-mcp
+```
+
+## API Doc Generator
+
+Generates LLM-friendly Markdown from Godot's XML class documentation, pinned to the Godot version in `template.toml`.
+
+```bash
+# Generate docs (fetches Godot XML source automatically)
+cargo run -p powertool-docs -- generate
+
+# Generate for a specific version
+cargo run -p powertool-docs -- generate --version 4.5.0
+
+# Clean generated files
+cargo run -p powertool-docs -- clean
+```
+
+Output goes to `doc_api/` — per-class `.md` files plus two indexes:
+- `_common.md` — 128 most-used classes
+- `_other.md` — everything else
+
+These are included automatically when you run `cargo xtask skill install`.
+
+## Agent Skill
+
+The `skill/` directory contains a knowledge base for AI coding assistants:
+
+- **SKILL.md** — manifest with progressive loading instructions
+- **gdscript.md** — GDScript language reference
+- **quirks.md** — 18+ documented Godot engine gotchas
+- **scene-generation.md** — patterns for programmatic `.tscn` creation
+- **script-generation.md** — runtime `.gd` script patterns
+- **coordination.md** — ordering scene + script generation
+- **doc_api/** — generated API reference (860+ classes)
+
+Install into your project for your agent of choice:
+
+```bash
+cargo xtask skill install                    # Claude Code (.claude/skills/)
+cargo xtask skill install --target codex     # Codex CLI (.agents/skills/)
+cargo xtask skill install --target generic   # Plain (skills/)
+```
+
+## Rust GDExtension (Optional)
+
+Disabled by default. To enable:
+
+1. In root `Cargo.toml`, change `members` to include `"extension"`
+2. In `godot/project.godot`, enable the extension plugin
+3. Run `cargo xtask build`
+
+See the extension directory for example Rust classes exposed to Godot.
+
+## License
+
+MIT OR Apache-2.0

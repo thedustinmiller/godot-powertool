@@ -1,0 +1,13 @@
+[package]
+name = "powertool-docs"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+powertool-common.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+quick-xml.workspace = true
+regex.workspace = true
+walkdir.workspace = true
