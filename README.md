@@ -17,6 +17,11 @@ cargo xtask run
 # Run tests
 cargo xtask test
 ```
+## About
+
+GDScript is inspired by Python but is NOT Python. It's also relatively low resource compared to Python and the pace of Godot 4+ changes has been quite rapid. So anyone using AI tools to help with Godot projects has run into issues with LLMs writing close, but not quite, script. Additionally, models seem to prefer procedural scene building over .tscn and have limited ability to 'see' what's being done. All together it's hard for them to iterate productively. This toolkit hopes to help with that, while also providing convenience tools for humans as well.
+
+This project was originally a template that gave a quick start for using Rust as a GDExtension and exporting a Godot app using it to the web via WASM. In addition, laziness led me to adding a suite of xtask convenience scripts. Once those were there, adding MCP and other tooling was too tempting.
 
 ## Workspace
 
@@ -170,3 +175,13 @@ See the extension directory for example Rust classes exposed to Godot.
 ## License
 
 MIT OR Apache-2.0
+
+## Acknowledgments
+
+This project is inspired by and heavily based on the following MIT licensed projects:
+
+- [godogen](https://github.com/htdt/godogen): Skill design, quirk docs, Godot doc preparation, scene building
+- [godot-mcp](https://github.com/Coding-Solo/godot-mcp): MCP server 
+- [godot-mcp-screenshot](https://github.com/tylerhaar7/godot-mcp-screenshot): Adding screenshot functionality to godot-mcp
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for full attribution and license text.
