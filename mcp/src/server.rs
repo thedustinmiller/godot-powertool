@@ -22,6 +22,8 @@ use powertool_common::{
     project,
 };
 
+use crate::connection::EditorConnection;
+
 /// Walk up from cwd looking for template.toml to find the project root.
 fn find_project_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
@@ -44,10 +46,13 @@ struct GodotProcess {
     errors: Vec<String>,
 }
 
+const DEFAULT_EDITOR_PORT: u16 = 6550;
+
 pub struct GodotMcpServer {
     godot_path: PathBuf,
     active_process: Arc<Mutex<Option<GodotProcess>>>,
     operations_script: PathBuf,
+    editor: Arc<EditorConnection>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -69,10 +74,18 @@ impl GodotMcpServer {
 
         let tool_router = Self::tool_router();
 
+        // Editor WebSocket connection
+        let port = std::env::var("POWERTOOL_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_EDITOR_PORT);
+        let editor = Arc::new(EditorConnection::new(port));
+
         Ok(Self {
             godot_path,
             active_process: Arc::new(Mutex::new(None)),
             operations_script,
+            editor,
             tool_router,
         })
     }
@@ -116,6 +129,53 @@ impl GodotMcpServer {
 
     fn timeout_from(timeout_seconds: Option<u64>) -> Duration {
         Duration::from_secs(timeout_seconds.unwrap_or(godot_cli::DEFAULT_TIMEOUT_SECS))
+    }
+
+    /// Try connecting to the editor on startup (non-fatal).
+    pub async fn try_connect_editor(&self) {
+        self.editor.try_connect().await;
+    }
+
+    pub fn is_editor_connected(&self) -> bool {
+        self.editor.is_connected()
+    }
+
+    /// Send a command to the editor via WebSocket.
+    async fn run_via_editor(
+        &self,
+        command: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, ErrorData> {
+        let resp = self
+            .editor
+            .send_command(command, params, timeout)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if resp.status == "success" {
+            Ok(resp.result.unwrap_or(serde_json::Value::Null))
+        } else {
+            let code = resp.code.as_deref().unwrap_or("INTERNAL_ERROR");
+            let msg = resp
+                .message
+                .unwrap_or_else(|| "Unknown editor error".into());
+            Err(ErrorData::internal_error(
+                format!("[{code}] {msg}"),
+                None,
+            ))
+        }
+    }
+
+    /// Require an active editor connection, returning a clear error if not connected.
+    fn require_editor(&self) -> Result<(), ErrorData> {
+        if !self.editor.is_connected() {
+            return Err(ErrorData::internal_error(
+                "Editor not connected. Launch the Godot editor with the PowerTool addon enabled.",
+                None,
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -237,6 +297,107 @@ struct TakeScreenshotParams {
     project_path: Option<String>,
     /// File path to save screenshot to (optional, returns base64 if not set)
     file_path: Option<String>,
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+// === Editor WebSocket tool parameter types ===
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EditorNodeParams {
+    /// Node path within the scene (e.g., "/root/Player")
+    node_path: String,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CreateNodeParams {
+    /// Parent node path (default: "/root")
+    parent_path: Option<String>,
+    /// Type of node to create (e.g., "Sprite2D", "CharacterBody2D")
+    node_type: String,
+    /// Name for the new node
+    node_name: String,
+    /// Initial properties to set on the node
+    properties: Option<serde_json::Value>,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DeleteNodeParams {
+    /// Path to the node to delete
+    node_path: String,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UpdateNodePropertyParams {
+    /// Path to the node
+    node_path: String,
+    /// Property name to update
+    property: String,
+    /// New value for the property
+    value: serde_json::Value,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListNodesParams {
+    /// Parent node path to list children of (default: "/root")
+    parent_path: Option<String>,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EditorScenePathParams {
+    /// Scene path (e.g., "res://scenes/main.tscn")
+    path: String,
+    /// Root node type for scene creation (default: "Node2D")
+    #[allow(dead_code)]
+    root_type: Option<String>,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EditorTimeoutParams {
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EditorScriptParams {
+    /// Path to the script file
+    script_path: String,
+    /// Script content
+    content: Option<String>,
+    /// Node path to attach script to (optional)
+    node_path: Option<String>,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetScriptParams {
+    /// Path to the script file (optional if node_path provided)
+    script_path: Option<String>,
+    /// Node to get script from (optional if script_path provided)
+    node_path: Option<String>,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExecuteEditorScriptParams {
+    /// GDScript code to execute in the editor context
+    code: String,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 // === Tool implementations ===
@@ -536,18 +697,329 @@ impl GodotMcpServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    /// Take a screenshot of the running Godot project
+    // === Editor WebSocket tools (require editor connection) ===
+
+    /// Create a node in the live editor scene tree
+    #[rmcp::tool]
+    async fn create_node(
+        &self,
+        Parameters(params): Parameters<CreateNodeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let mut p = serde_json::json!({
+            "parent_path": params.parent_path.unwrap_or_else(|| "/root".into()),
+            "node_type": params.node_type,
+            "node_name": params.node_name,
+        });
+        if let Some(ref props) = params.properties {
+            p["properties"] = props.clone();
+        }
+        let result = self.run_via_editor("create_node", p, timeout).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Delete a node from the live editor scene tree
+    #[rmcp::tool]
+    async fn delete_node(
+        &self,
+        Parameters(params): Parameters<DeleteNodeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor(
+                "delete_node",
+                serde_json::json!({"node_path": params.node_path}),
+                timeout,
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Update a property on a node in the live editor
+    #[rmcp::tool]
+    async fn update_node_property(
+        &self,
+        Parameters(params): Parameters<UpdateNodePropertyParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor(
+                "update_node_property",
+                serde_json::json!({
+                    "node_path": params.node_path,
+                    "property": params.property,
+                    "value": params.value,
+                }),
+                timeout,
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Get all properties of a node in the live editor
+    #[rmcp::tool]
+    async fn get_node_properties(
+        &self,
+        Parameters(params): Parameters<EditorNodeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor(
+                "get_node_properties",
+                serde_json::json!({"node_path": params.node_path}),
+                timeout,
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// List child nodes of a parent in the live editor scene tree
+    #[rmcp::tool]
+    async fn list_nodes(
+        &self,
+        Parameters(params): Parameters<ListNodesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor(
+                "list_nodes",
+                serde_json::json!({
+                    "parent_path": params.parent_path.unwrap_or_else(|| "/root".into()),
+                }),
+                timeout,
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Open a scene in the editor
+    #[rmcp::tool]
+    async fn open_scene(
+        &self,
+        Parameters(params): Parameters<EditorScenePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor(
+                "open_scene",
+                serde_json::json!({"path": params.path}),
+                timeout,
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Get info about the currently open scene in the editor
+    #[rmcp::tool]
+    async fn get_current_scene(
+        &self,
+        Parameters(params): Parameters<EditorTimeoutParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor("get_current_scene", serde_json::json!({}), timeout)
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Get the full scene tree structure of the currently open scene
+    #[rmcp::tool]
+    async fn get_scene_structure(
+        &self,
+        Parameters(params): Parameters<EditorTimeoutParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor("get_scene_structure", serde_json::json!({}), timeout)
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Create a new GDScript file via the editor
+    #[rmcp::tool]
+    async fn create_script_editor(
+        &self,
+        Parameters(params): Parameters<EditorScriptParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let mut p = serde_json::json!({"script_path": params.script_path});
+        if let Some(ref c) = params.content {
+            p["content"] = serde_json::json!(c);
+        }
+        if let Some(ref n) = params.node_path {
+            p["node_path"] = serde_json::json!(n);
+        }
+        let result = self.run_via_editor("create_script", p, timeout).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Edit an existing GDScript file via the editor
+    #[rmcp::tool]
+    async fn edit_script_editor(
+        &self,
+        Parameters(params): Parameters<EditorScriptParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor(
+                "edit_script",
+                serde_json::json!({
+                    "script_path": params.script_path,
+                    "content": params.content.unwrap_or_default(),
+                }),
+                timeout,
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Get a script's content via the editor
+    #[rmcp::tool]
+    async fn get_script_editor(
+        &self,
+        Parameters(params): Parameters<GetScriptParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let mut p = serde_json::json!({});
+        if let Some(ref sp) = params.script_path {
+            p["script_path"] = serde_json::json!(sp);
+        }
+        if let Some(ref np) = params.node_path {
+            p["node_path"] = serde_json::json!(np);
+        }
+        let result = self.run_via_editor("get_script", p, timeout).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Get the current editor state (open scene, selection, playing status)
+    #[rmcp::tool]
+    async fn get_editor_state(
+        &self,
+        Parameters(params): Parameters<EditorTimeoutParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor("get_editor_state", serde_json::json!({}), timeout)
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Get the currently selected node in the editor
+    #[rmcp::tool]
+    async fn get_selected_node(
+        &self,
+        Parameters(params): Parameters<EditorTimeoutParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor("get_selected_node", serde_json::json!({}), timeout)
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Execute arbitrary GDScript code in the editor context
+    #[rmcp::tool]
+    async fn execute_editor_script(
+        &self,
+        Parameters(params): Parameters<ExecuteEditorScriptParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor()?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor(
+                "execute_editor_script",
+                serde_json::json!({"code": params.code}),
+                timeout,
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Take a screenshot of the editor viewport or running project
     #[rmcp::tool]
     async fn take_screenshot(
         &self,
         Parameters(params): Parameters<TakeScreenshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Try editor WebSocket path first
+        if self.editor.is_connected() {
+            let timeout = Self::timeout_from(params.timeout_seconds);
+            let result = self
+                .run_via_editor("take_screenshot", serde_json::json!({}), timeout)
+                .await?;
+
+            // Editor returns base64 PNG in result.image_base64
+            if let Some(b64) = result.get("image_base64").and_then(|v| v.as_str()) {
+                if let Some(ref save_path) = params.file_path {
+                    use base64::Engine;
+                    let data = base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .map_err(|e| ErrorData::internal_error(format!("Base64 decode error: {e}"), None))?;
+                    fs::write(save_path, &data)
+                        .map_err(|e| ErrorData::internal_error(format!("Failed to save: {e}"), None))?;
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Screenshot saved to: {save_path}"
+                    ))]));
+                }
+                return Ok(CallToolResult::success(vec![Content::image(
+                    b64.to_string(),
+                    "image/png",
+                )]));
+            }
+
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap_or_default(),
+            )]));
+        }
+
+        // Fallback: file-polling with running project
         // Must have a running project
         {
             let active = self.active_process.lock().await;
             if active.is_none() {
                 return Err(ErrorData::invalid_params(
-                    "No Godot project is currently running. Start one with run_project first.",
+                    "No Godot project is currently running and editor is not connected.",
                     None,
                 ));
             }

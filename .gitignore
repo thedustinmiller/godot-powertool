@@ -107,3 +107,4 @@ doc_api/
 *.log
 *.bak
 *.tmp
+references/

@@ -2,6 +2,7 @@ use anyhow::Result;
 use rmcp::{ServiceExt, transport::io};
 use tracing_subscriber::{EnvFilter, fmt};
 
+mod connection;
 mod server;
 
 use server::GodotMcpServer;
@@ -17,8 +18,16 @@ async fn main() -> Result<()> {
     tracing::info!("Starting Godot MCP server...");
 
     let server = GodotMcpServer::new()?;
+    server.try_connect_editor().await;
 
-    tracing::info!("Godot MCP server running on stdio");
+    tracing::info!(
+        "Godot MCP server running on stdio (editor: {})",
+        if server.is_editor_connected() {
+            "connected"
+        } else {
+            "not connected"
+        }
+    );
 
     let service = server.serve(io::stdio()).await?;
     service.waiting().await?;
