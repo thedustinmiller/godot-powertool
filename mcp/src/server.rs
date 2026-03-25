@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -94,20 +95,27 @@ impl GodotMcpServer {
         Ok(p)
     }
 
-    fn run_operation(
+    async fn run_operation(
         &self,
         project_path: &Path,
         op: &str,
         params: &serde_json::Value,
+        timeout: Duration,
     ) -> Result<String, ErrorData> {
-        godot_cli::run_godot_operation(
+        godot_cli::run_godot_operation_async(
             &self.godot_path,
             project_path,
             &self.operations_script,
             op,
             params,
+            timeout,
         )
+        .await
         .map_err(|e| ErrorData::internal_error(format!("Godot operation failed: {e}"), None))
+    }
+
+    fn timeout_from(timeout_seconds: Option<u64>) -> Duration {
+        Duration::from_secs(timeout_seconds.unwrap_or(godot_cli::DEFAULT_TIMEOUT_SECS))
     }
 }
 
@@ -117,6 +125,8 @@ impl GodotMcpServer {
 struct ProjectPathParams {
     /// Path to the Godot project directory
     project_path: String,
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -143,6 +153,8 @@ struct CreateSceneParams {
     scene_path: String,
     /// Root node type (default: "Node2D")
     root_node_type: Option<String>,
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -159,6 +171,8 @@ struct AddNodeParams {
     parent_node_path: Option<String>,
     /// Properties to set on the node
     properties: Option<serde_json::Value>,
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -171,6 +185,8 @@ struct LoadSpriteParams {
     node_path: String,
     /// Path to the texture resource
     texture_path: String,
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -181,6 +197,8 @@ struct SaveSceneParams {
     scene_path: String,
     /// Optional new path to save as
     new_path: Option<String>,
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -193,6 +211,8 @@ struct ExportMeshLibraryParams {
     output_path: String,
     /// Specific mesh item names to export (all if empty)
     mesh_item_names: Option<Vec<String>>,
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -201,6 +221,14 @@ struct FilePathParams {
     project_path: String,
     /// Path to the file within the project
     file_path: String,
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetGodotVersionParams {
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -217,8 +245,13 @@ struct TakeScreenshotParams {
 impl GodotMcpServer {
     /// Get the installed Godot engine version
     #[rmcp::tool]
-    async fn get_godot_version(&self) -> Result<CallToolResult, ErrorData> {
-        let version = godot_cli::get_godot_version(&self.godot_path)
+    async fn get_godot_version(
+        &self,
+        Parameters(params): Parameters<GetGodotVersionParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let version = godot_cli::get_godot_version_async(&self.godot_path, timeout)
+            .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(version)]))
     }
@@ -391,7 +424,8 @@ impl GodotMcpServer {
             "scene_path": params.scene_path,
             "root_node_type": params.root_node_type.unwrap_or_else(|| "Node2D".to_string()),
         });
-        let output = self.run_operation(&project, "create_scene", &op_params)?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let output = self.run_operation(&project, "create_scene", &op_params, timeout).await?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -413,7 +447,8 @@ impl GodotMcpServer {
         if let Some(ref props) = params.properties {
             op_params["properties"] = props.clone();
         }
-        let output = self.run_operation(&project, "add_node", &op_params)?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let output = self.run_operation(&project, "add_node", &op_params, timeout).await?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -429,7 +464,8 @@ impl GodotMcpServer {
             "node_path": params.node_path,
             "texture_path": params.texture_path,
         });
-        let output = self.run_operation(&project, "load_sprite", &op_params)?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let output = self.run_operation(&project, "load_sprite", &op_params, timeout).await?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -446,7 +482,8 @@ impl GodotMcpServer {
         if let Some(ref new) = params.new_path {
             op_params["new_path"] = serde_json::json!(new);
         }
-        let output = self.run_operation(&project, "save_scene", &op_params)?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let output = self.run_operation(&project, "save_scene", &op_params, timeout).await?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -464,7 +501,8 @@ impl GodotMcpServer {
         if let Some(ref names) = params.mesh_item_names {
             op_params["mesh_item_names"] = serde_json::json!(names);
         }
-        let output = self.run_operation(&project, "export_mesh_library", &op_params)?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let output = self.run_operation(&project, "export_mesh_library", &op_params, timeout).await?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -478,7 +516,8 @@ impl GodotMcpServer {
         let op_params = serde_json::json!({
             "file_path": params.file_path,
         });
-        let output = self.run_operation(&project, "get_uid", &op_params)?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let output = self.run_operation(&project, "get_uid", &op_params, timeout).await?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -492,7 +531,8 @@ impl GodotMcpServer {
         let op_params = serde_json::json!({
             "project_path": params.project_path,
         });
-        let output = self.run_operation(&project, "resave_resources", &op_params)?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let output = self.run_operation(&project, "resave_resources", &op_params, timeout).await?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 

@@ -1,6 +1,7 @@
 use std::{
     path::Path,
     process::{Child, Command, Output, Stdio},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -78,5 +79,84 @@ pub fn get_godot_version(binary: &Path) -> Result<String> {
         .arg("--version")
         .output()
         .context("Failed to get Godot version")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Default timeout for Godot operations.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 15;
+
+/// Run a Godot command asynchronously with a timeout.
+///
+/// Spawns the process via `tokio::process::Command`, then races
+/// `child.wait_with_output()` against `tokio::time::timeout`.
+/// On timeout the child is killed before returning an error.
+async fn run_with_timeout(
+    child: tokio::process::Child,
+    timeout: Duration,
+    label: &str,
+) -> Result<Output> {
+    // child was spawned with kill_on_drop(true) so if the timeout fires
+    // and the future (which owns the child) is dropped, the process is killed.
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(result) => result.with_context(|| format!("Failed to wait on Godot process: {label}")),
+        Err(_) => {
+            bail!("{label} timed out after {:.0}s", timeout.as_secs_f64());
+        }
+    }
+}
+
+/// Async version of [`run_godot_operation`] with a configurable timeout.
+pub async fn run_godot_operation_async(
+    binary: &Path,
+    project: &Path,
+    script: &Path,
+    op: &str,
+    params: &serde_json::Value,
+    timeout: Duration,
+) -> Result<String> {
+    let params_str = serde_json::to_string(params)?;
+
+    let child = tokio::process::Command::new(binary)
+        .args([
+            "--headless",
+            "--path",
+            &project.to_string_lossy(),
+            "--script",
+            &script.to_string_lossy(),
+            op,
+            &params_str,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("Failed to spawn Godot operation: {op}"))?;
+
+    let output = run_with_timeout(child, timeout, &format!("Godot operation '{op}'")).await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        bail!(
+            "Godot operation '{op}' failed (exit code: {:?}):\nstdout: {stdout}\nstderr: {stderr}",
+            output.status.code()
+        );
+    }
+
+    Ok(stdout)
+}
+
+/// Async version of [`get_godot_version`] with a configurable timeout.
+pub async fn get_godot_version_async(binary: &Path, timeout: Duration) -> Result<String> {
+    let child = tokio::process::Command::new(binary)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("Failed to spawn Godot for --version")?;
+
+    let output = run_with_timeout(child, timeout, "godot --version").await?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
