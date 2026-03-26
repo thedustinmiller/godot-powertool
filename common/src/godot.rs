@@ -62,7 +62,7 @@ pub fn run_godot_operation(
     Ok(stdout)
 }
 
-/// Spawn Godot as a non-blocking child process (for `run_project`, `launch_editor`, etc.).
+/// Spawn Godot as a non-blocking child process (for `run_scene`, `launch_editor`, etc.).
 ///
 /// `stdout` and `stderr` control where the child's output streams go:
 /// - `Stdio::null()` — discard output (best for long-lived processes like the editor)

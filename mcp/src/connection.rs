@@ -19,6 +19,7 @@ pub struct WsResponse {
     pub result: Option<serde_json::Value>,
     pub message: Option<String>,
     pub code: Option<String>,
+    pub details: Option<serde_json::Value>,
 }
 
 type WsSink =
@@ -161,6 +162,7 @@ impl EditorConnection {
                             result: json.get("result").cloned(),
                             message: json.get("message").and_then(|v| v.as_str()).map(String::from),
                             code: json.get("code").and_then(|v| v.as_str()).map(String::from),
+                            details: json.get("details").cloned(),
                         };
 
                         if !id.is_empty() {
@@ -190,6 +192,7 @@ impl EditorConnection {
                 result: None,
                 message: Some("Editor connection closed".into()),
                 code: Some("DISCONNECTED".into()),
+                details: None,
             });
         }
 

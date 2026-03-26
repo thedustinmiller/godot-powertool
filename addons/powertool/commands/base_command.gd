@@ -19,14 +19,17 @@ func _send_success(peer_id: int, result: Dictionary, command_id: String) -> void
 		})
 
 
-func _send_error(peer_id: int, message: String, command_id: String, code: String = "INTERNAL_ERROR") -> void:
+func _send_error(peer_id: int, message: String, command_id: String, code: String = "INTERNAL_ERROR", details: Dictionary = {}) -> void:
 	if _server:
-		_server.send_response(peer_id, {
+		var response := {
 			"id": command_id,
 			"status": "error",
 			"message": message,
 			"code": code,
-		})
+		}
+		if not details.is_empty():
+			response["details"] = details
+		_server.send_response(peer_id, response)
 	push_error("[PowerTool] %s" % message)
 
 
@@ -62,6 +65,52 @@ func _get_editor_node(path: String) -> Node:
 		path = path.substr(1)
 
 	return root.get_node_or_null(path)
+
+
+## Build details dict for a failed node path lookup.
+func _node_not_found_details(path: String) -> Dictionary:
+	var root := _get_edited_scene_root()
+	if not root:
+		return {"hint": "No scene is currently being edited."}
+
+	var details := {
+		"scene_root_name": root.name,
+		"scene_root_type": root.get_class(),
+		"requested_path": path,
+	}
+
+	# Find the deepest valid ancestor to show its children
+	var resolved_path := path
+	if resolved_path.begins_with("/root/"):
+		resolved_path = resolved_path.substr(6)
+	elif resolved_path.begins_with("/"):
+		resolved_path = resolved_path.substr(1)
+
+	# Check if the first segment matches the scene root name — common mistake
+	var segments := resolved_path.split("/")
+	if segments.size() > 0 and segments[0] == root.name:
+		details["hint"] = "The scene root '%s' is addressed as /root, not /root/%s. Try /root/%s instead." % [
+			root.name, root.name, "/".join(segments.slice(1))
+		]
+
+	# List children of the closest valid ancestor
+	var parent := root
+	var valid_depth := 0
+	for i in range(segments.size() - 1):
+		var child := parent.get_node_or_null(segments[i])
+		if child:
+			parent = child
+			valid_depth = i + 1
+		else:
+			break
+
+	var child_names: Array[String] = []
+	for child in parent.get_children():
+		child_names.append(child.name)
+	details["nearest_valid_path"] = "/root" if valid_depth == 0 else "/root/" + "/".join(segments.slice(0, valid_depth))
+	details["available_children"] = child_names
+
+	return details
 
 
 func _mark_scene_modified() -> void:

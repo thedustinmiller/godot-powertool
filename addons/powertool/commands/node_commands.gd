@@ -39,7 +39,7 @@ func _create_node(peer_id: int, params: Dictionary, command_id: String) -> void:
 
 	var parent := _get_editor_node(parent_path)
 	if not parent:
-		return _send_error(peer_id, "Parent node not found: %s" % parent_path, command_id, "INVALID_PARAMS")
+		return _send_error(peer_id, "Parent node not found: %s" % parent_path, command_id, "INVALID_PARAMS", _node_not_found_details(parent_path))
 
 	var node = ClassDB.instantiate(node_type)
 	if not node:
@@ -76,7 +76,7 @@ func _delete_node(peer_id: int, params: Dictionary, command_id: String) -> void:
 
 	var node := _get_editor_node(node_path)
 	if not node:
-		return _send_error(peer_id, "Node not found: %s" % node_path, command_id, "INVALID_PARAMS")
+		return _send_error(peer_id, "Node not found: %s" % node_path, command_id, "INVALID_PARAMS", _node_not_found_details(node_path))
 
 	if node == root:
 		return _send_error(peer_id, "Cannot delete the root node", command_id, "INVALID_PARAMS")
@@ -103,7 +103,7 @@ func _update_node_property(peer_id: int, params: Dictionary, command_id: String)
 
 	var node := _get_editor_node(node_path)
 	if not node:
-		return _send_error(peer_id, "Node not found: %s" % node_path, command_id, "INVALID_PARAMS")
+		return _send_error(peer_id, "Node not found: %s" % node_path, command_id, "INVALID_PARAMS", _node_not_found_details(node_path))
 
 	if not property_name in node:
 		return _send_error(peer_id, "Property '%s' does not exist on node %s" % [property_name, node_path], command_id, "INVALID_PARAMS")
@@ -137,7 +137,7 @@ func _get_node_properties(peer_id: int, params: Dictionary, command_id: String) 
 
 	var node := _get_editor_node(node_path)
 	if not node:
-		return _send_error(peer_id, "Node not found: %s" % node_path, command_id, "INVALID_PARAMS")
+		return _send_error(peer_id, "Node not found: %s" % node_path, command_id, "INVALID_PARAMS", _node_not_found_details(node_path))
 
 	var properties := {}
 	for prop in node.get_property_list():
@@ -159,7 +159,7 @@ func _list_nodes(peer_id: int, params: Dictionary, command_id: String) -> void:
 
 	var parent := _get_editor_node(parent_path)
 	if not parent:
-		return _send_error(peer_id, "Parent node not found: %s" % parent_path, command_id, "INVALID_PARAMS")
+		return _send_error(peer_id, "Parent node not found: %s" % parent_path, command_id, "INVALID_PARAMS", _node_not_found_details(parent_path))
 
 	var children := []
 	for child in parent.get_children():

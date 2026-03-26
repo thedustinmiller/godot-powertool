@@ -97,9 +97,9 @@ The MCP server provides 30 tools for AI agents to interact with Godot. When the 
 | Tool | Description |
 |------|-------------|
 | `get_godot_version` | Get installed Godot version |
-| `launch_editor` | Open the Godot editor |
-| `run_project` / `stop_project` | Run/stop a project in debug mode |
-| `get_debug_output` | Read stdout/stderr from running project |
+| `launch_editor` / `stop_editor` | Open/close the Godot editor |
+| `run_scene` / `stop_scene` | Run/stop a scene in debug mode |
+| `get_debug_output` | Read stdout/stderr from running scene |
 | `list_projects` | Find Godot projects in a directory |
 | `get_project_info` | Get project metadata (scenes, scripts, etc.) |
 | `create_scene` / `add_node` / `save_scene` | Scene file manipulation (headless) |

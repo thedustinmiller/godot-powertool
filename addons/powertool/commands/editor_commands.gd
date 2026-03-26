@@ -132,9 +132,11 @@ func custom_print(values):
 
 func run():
 	var scene = get_tree().edited_scene_root
-	var err = _execute_code()
-	if err != OK:
-		_error_message = "Script execution failed with error: " + str(err)
+	var ret = _execute_code()
+	if ret is int and ret != OK:
+		_error_message = "Script execution failed with error: " + str(ret)
+	elif not (ret is int):
+		result = ret
 	execution_completed.emit()
 
 func _execute_code():
@@ -149,7 +151,13 @@ func _execute_code():
 	if err != OK:
 		remove_child(script_node)
 		script_node.queue_free()
-		return _send_error(peer_id, "Script parse error: %s" % error_string(err), command_id)
+		return _send_error(peer_id,
+			"Script parse error: %s. User code is wrapped inside a function body — only statements are valid (no class definitions, extends, or func declarations)." % error_string(err),
+			command_id, "INVALID_PARAMS", {
+				"wrapped_source": script_content,
+				"original_code": code,
+				"hint": "Your code is inserted into _execute_code(). Only statements valid inside a function body are supported. Available variables: 'scene' (edited scene root).",
+			})
 
 	script_node.set_script(script)
 	script_node.connect("execution_completed", _on_script_completed.bind(script_node, peer_id, command_id))

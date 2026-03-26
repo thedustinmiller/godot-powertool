@@ -51,6 +51,7 @@ const DEFAULT_EDITOR_PORT: u16 = 6550;
 pub struct GodotMcpServer {
     godot_path: PathBuf,
     active_process: Arc<Mutex<Option<GodotProcess>>>,
+    editor_process: Arc<Mutex<Option<Child>>>,
     operations_script: PathBuf,
     editor: Arc<EditorConnection>,
     #[allow(dead_code)]
@@ -84,6 +85,7 @@ impl GodotMcpServer {
         Ok(Self {
             godot_path,
             active_process: Arc::new(Mutex::new(None)),
+            editor_process: Arc::new(Mutex::new(None)),
             operations_script,
             editor,
             tool_router,
@@ -160,10 +162,18 @@ impl GodotMcpServer {
             let msg = resp
                 .message
                 .unwrap_or_else(|| "Unknown editor error".into());
-            Err(ErrorData::internal_error(
-                format!("[{code}] {msg}"),
-                None,
-            ))
+
+            // Build structured error data with details from the addon
+            let error_data = resp.details.map(|d| serde_json::json!({
+                "code": code,
+                "details": d,
+            }));
+
+            match code {
+                "INVALID_PARAMS" => Err(ErrorData::invalid_params(msg, error_data)),
+                "NO_SCENE" => Err(ErrorData::invalid_params(msg, error_data)),
+                _ => Err(ErrorData::internal_error(msg, error_data)),
+            }
         }
     }
 
@@ -192,10 +202,10 @@ struct ProjectPathParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct RunProjectParams {
+struct RunSceneParams {
     /// Path to the Godot project directory
     project_path: String,
-    /// Specific scene to run (optional)
+    /// Specific scene to run (optional, defaults to main scene)
     scene: Option<String>,
 }
 
@@ -307,7 +317,7 @@ struct TakeScreenshotParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EditorNodeParams {
-    /// Node path within the scene (e.g., "/root/Player")
+    /// Node path relative to the edited scene root. /root = scene root node, /root/Child = direct child. The scene root's own name is NOT part of the path (use /root, not /root/MySceneRoot).
     node_path: String,
     /// Timeout in seconds (default: 15)
     timeout_seconds: Option<u64>,
@@ -315,7 +325,7 @@ struct EditorNodeParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CreateNodeParams {
-    /// Parent node path (default: "/root")
+    /// Parent node path relative to the edited scene root (default: "/root" = scene root). The scene root's own name is NOT part of the path.
     parent_path: Option<String>,
     /// Type of node to create (e.g., "Sprite2D", "CharacterBody2D")
     node_type: String,
@@ -329,7 +339,7 @@ struct CreateNodeParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct DeleteNodeParams {
-    /// Path to the node to delete
+    /// Node path relative to the edited scene root (e.g., /root/Child). The scene root's own name is NOT part of the path.
     node_path: String,
     /// Timeout in seconds (default: 15)
     timeout_seconds: Option<u64>,
@@ -337,7 +347,7 @@ struct DeleteNodeParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct UpdateNodePropertyParams {
-    /// Path to the node
+    /// Node path relative to the edited scene root (e.g., /root/Child). The scene root's own name is NOT part of the path.
     node_path: String,
     /// Property name to update
     property: String,
@@ -349,7 +359,7 @@ struct UpdateNodePropertyParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ListNodesParams {
-    /// Parent node path to list children of (default: "/root")
+    /// Parent node path relative to the edited scene root (default: "/root" = scene root). The scene root's own name is NOT part of the path.
     parent_path: Option<String>,
     /// Timeout in seconds (default: 15)
     timeout_seconds: Option<u64>,
@@ -396,7 +406,7 @@ struct GetScriptParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ExecuteEditorScriptParams {
-    /// GDScript code to execute in the editor context
+    /// GDScript statements to execute in the editor context. Code runs inside a function body — only statements are valid (no extends, class_name, or func declarations). A 'scene' variable referencing the edited scene root is available. print() output is captured and returned.
     code: String,
     /// Timeout in seconds (default: 15)
     timeout_seconds: Option<u64>,
@@ -426,19 +436,40 @@ impl GodotMcpServer {
         Parameters(params): Parameters<ProjectPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let project = Self::validate_project_path(&params.project_path)?;
-        godot_cli::spawn_godot(&self.godot_path, &["-e", "--path", &project.to_string_lossy()], &project, Stdio::null(), Stdio::null())
+        let child = godot_cli::spawn_godot(&self.godot_path, &["-e", "--path", &project.to_string_lossy()], &project, Stdio::null(), Stdio::null())
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        {
+            let mut editor = self.editor_process.lock().await;
+            *editor = Some(child);
+        }
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Launched Godot editor for {}",
             params.project_path
         ))]))
     }
 
-    /// Run a Godot project in debug mode
+    /// Stop the Godot editor
     #[rmcp::tool]
-    async fn run_project(
+    async fn stop_editor(&self) -> Result<CallToolResult, ErrorData> {
+        let mut editor = self.editor_process.lock().await;
+        match editor.take() {
+            Some(mut child) => {
+                let _ = child.kill();
+                Ok(CallToolResult::success(vec![Content::text(
+                    "Editor stopped",
+                )]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(
+                "No editor was running",
+            )])),
+        }
+    }
+
+    /// Run a Godot scene in debug mode
+    #[rmcp::tool]
+    async fn run_scene(
         &self,
-        Parameters(params): Parameters<RunProjectParams>,
+        Parameters(params): Parameters<RunSceneParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let project = Self::validate_project_path(&params.project_path)?;
 
@@ -474,8 +505,9 @@ impl GodotMcpServer {
             });
         }
 
+        let scene_info = params.scene.as_deref().unwrap_or("main scene");
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Started Godot project: {}",
+            "Running {scene_info} from {}",
             params.project_path
         ))]))
     }
@@ -501,15 +533,15 @@ impl GodotMcpServer {
         }
     }
 
-    /// Stop the currently running Godot project
+    /// Stop the currently running Godot scene
     #[rmcp::tool]
-    async fn stop_project(&self) -> Result<CallToolResult, ErrorData> {
+    async fn stop_scene(&self) -> Result<CallToolResult, ErrorData> {
         let mut active = self.active_process.lock().await;
         match active.take() {
             Some(mut proc) => {
                 let _ = proc.child.kill();
                 let final_output = serde_json::json!({
-                    "message": "Project stopped",
+                    "message": "Scene stopped",
                     "final_output": proc.output,
                     "final_errors": proc.errors,
                 });
@@ -518,7 +550,7 @@ impl GodotMcpServer {
                 )]))
             }
             None => Ok(CallToolResult::success(vec![Content::text(
-                "No project was running",
+                "No scene was running",
             )])),
         }
     }
