@@ -63,12 +63,23 @@ pub fn run_godot_operation(
 }
 
 /// Spawn Godot as a non-blocking child process (for `run_project`, `launch_editor`, etc.).
-pub fn spawn_godot(binary: &Path, args: &[&str], cwd: &Path) -> Result<Child> {
+///
+/// `stdout` and `stderr` control where the child's output streams go:
+/// - `Stdio::null()` — discard output (best for long-lived processes like the editor)
+/// - `Stdio::piped()` — capture output for the parent to read
+/// - `Stdio::inherit()` — forward to the parent's own streams
+pub fn spawn_godot(
+    binary: &Path,
+    args: &[&str],
+    cwd: &Path,
+    stdout: Stdio,
+    stderr: Stdio,
+) -> Result<Child> {
     Command::new(binary)
         .args(args)
         .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .with_context(|| format!("Failed to spawn Godot with args: {args:?}"))
 }

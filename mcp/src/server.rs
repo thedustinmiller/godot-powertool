@@ -426,7 +426,7 @@ impl GodotMcpServer {
         Parameters(params): Parameters<ProjectPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let project = Self::validate_project_path(&params.project_path)?;
-        godot_cli::spawn_godot(&self.godot_path, &["-e", "--path", &project.to_string_lossy()], &project)
+        godot_cli::spawn_godot(&self.godot_path, &["-e", "--path", &project.to_string_lossy()], &project, Stdio::null(), Stdio::null())
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Launched Godot editor for {}",
