@@ -29,7 +29,7 @@ This project was originally a template that gave a quick start for using Rust as
 |-------|------|-------------------------------------------------------------------------|
 | `common` | lib | Shared platform detection, Godot CLI wrappers, config, project scanning |
 | `xtask` | bin | Convenience scripts for humans (`cargo xtask <command>`)                |
-| `mcp` | bin | MCP server for AI agents (15 tools over stdio)                          |
+| `mcp` | bin | MCP server for AI agents (30 tools over stdio + WebSocket)              |
 | `docs` | bin | Godot docs -> markdown generator                                        |
 
 
@@ -39,6 +39,7 @@ This project was originally a template that gave a quick start for using Rust as
 | `extension/` | Optional Rust GDExtension (disabled by default)       |
 | `web/` | Optional Vite frontend + Playwright tests             |
 | `skill/` | Agent knowledge base (GDScript ref, quirks, patterns) |
+| `addons/powertool/` | EditorPlugin addon (WebSocket server, live editor tools) |
 | `scripts/` | GDScript helpers (MCP operations, screenshot capture) |
 
 ## Configuration
@@ -89,24 +90,38 @@ cargo xtask mcp install cursor # Print config for Cursor
 
 ## MCP Server
 
-The MCP server exposes 15 tools for AI agents to interact with Godot:
+The MCP server provides 30 tools for AI agents to interact with Godot. When the editor is running with the PowerTool addon, tools connect via WebSocket for instant operations. Without the editor, headless Godot fallback is used.
+
+### Headless tools (always available)
 
 | Tool | Description |
 |------|-------------|
 | `get_godot_version` | Get installed Godot version |
 | `launch_editor` | Open the Godot editor |
-| `run_project` | Run a project in debug mode |
+| `run_project` / `stop_project` | Run/stop a project in debug mode |
 | `get_debug_output` | Read stdout/stderr from running project |
-| `stop_project` | Stop the running project |
 | `list_projects` | Find Godot projects in a directory |
 | `get_project_info` | Get project metadata (scenes, scripts, etc.) |
-| `create_scene` | Create a new scene file |
-| `add_node` | Add a node to an existing scene |
+| `create_scene` / `add_node` / `save_scene` | Scene file manipulation (headless) |
 | `load_sprite` | Load a texture into a sprite node |
-| `save_scene` | Save scene changes |
 | `export_mesh_library` | Export 3D scene as MeshLibrary |
 | `get_uid` / `update_project_uids` | UID management (Godot 4.4+) |
-| `take_screenshot` | Capture viewport screenshot (requires ScreenshotManager autoload) |
+
+### Editor tools (require PowerTool addon)
+
+| Tool | Description |
+|------|-------------|
+| `create_node` / `delete_node` | Add/remove nodes in the live scene tree |
+| `update_node_property` | Set properties on nodes with undo/redo |
+| `get_node_properties` / `list_nodes` | Inspect the live scene tree |
+| `open_scene` / `get_current_scene` | Scene navigation |
+| `get_scene_structure` | Full recursive tree dump |
+| `create_script_editor` / `edit_script_editor` / `get_script_editor` | Script CRUD via editor |
+| `get_editor_state` / `get_selected_node` | Editor state and selection |
+| `execute_editor_script` | Run arbitrary GDScript in the editor |
+| `take_screenshot` | Capture running game (via debugger) or editor viewport |
+
+Multiple agents can connect simultaneously. Mutating commands use transparent per-resource locking with 5s timeout — crashed agents' locks expire automatically.
 
 ### Setup
 
@@ -120,6 +135,16 @@ claude mcp add godot -- ./target/release/powertool-mcp
 # Or set GODOT_PATH if Godot isn't on your PATH
 GODOT_PATH=/path/to/godot claude mcp add godot -- ./target/release/powertool-mcp
 ```
+
+### PowerTool Addon
+
+The editor addon lives in `addons/powertool/`. To install in your Godot project:
+
+1. Copy (or symlink) `addons/powertool/` into your project's `addons/` directory
+2. Open the project in Godot
+3. Project → Project Settings → Plugins → Enable "PowerTool"
+
+The addon starts a WebSocket server on `127.0.0.1:6550` (configurable via `POWERTOOL_PORT` env var). It also registers a game-side autoload (`PowerToolGame`) that enables screenshots and scene inspection of running games via the Godot debugger connection.
 
 ## API Doc Generator
 

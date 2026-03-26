@@ -167,13 +167,15 @@ impl GodotMcpServer {
         }
     }
 
-    /// Require an active editor connection, returning a clear error if not connected.
-    fn require_editor(&self) -> Result<(), ErrorData> {
+    /// Require an active editor connection, attempting to connect if needed.
+    async fn require_editor(&self) -> Result<(), ErrorData> {
         if !self.editor.is_connected() {
-            return Err(ErrorData::internal_error(
-                "Editor not connected. Launch the Godot editor with the PowerTool addon enabled.",
-                None,
-            ));
+            self.editor.ensure_connected().await.map_err(|_| {
+                ErrorData::internal_error(
+                    "Editor not connected. Launch the Godot editor with the PowerTool addon enabled.",
+                    None,
+                )
+            })?;
         }
         Ok(())
     }
@@ -705,7 +707,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<CreateNodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let mut p = serde_json::json!({
             "parent_path": params.parent_path.unwrap_or_else(|| "/root".into()),
@@ -727,7 +729,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<DeleteNodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor(
@@ -747,7 +749,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<UpdateNodePropertyParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor(
@@ -771,7 +773,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<EditorNodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor(
@@ -791,7 +793,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<ListNodesParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor(
@@ -813,7 +815,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<EditorScenePathParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor(
@@ -833,7 +835,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<EditorTimeoutParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor("get_current_scene", serde_json::json!({}), timeout)
@@ -849,7 +851,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<EditorTimeoutParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor("get_scene_structure", serde_json::json!({}), timeout)
@@ -865,7 +867,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<EditorScriptParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let mut p = serde_json::json!({"script_path": params.script_path});
         if let Some(ref c) = params.content {
@@ -886,7 +888,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<EditorScriptParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor(
@@ -909,7 +911,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<GetScriptParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let mut p = serde_json::json!({});
         if let Some(ref sp) = params.script_path {
@@ -930,7 +932,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<EditorTimeoutParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor("get_editor_state", serde_json::json!({}), timeout)
@@ -946,7 +948,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<EditorTimeoutParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor("get_selected_node", serde_json::json!({}), timeout)
@@ -962,7 +964,7 @@ impl GodotMcpServer {
         &self,
         Parameters(params): Parameters<ExecuteEditorScriptParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.require_editor()?;
+        self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
         let result = self
             .run_via_editor(

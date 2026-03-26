@@ -16,6 +16,10 @@
 - **Chase camera `current` re-assertion** — game cameras that set `current = true` in `_physics_process()` override the test harness camera every frame. Test harnesses must disable the game camera EVERY frame.
 - **`CharacterBody3D.MOTION_MODE_FLOATING`** — also needed for 3D non-platformer movement (vehicles on slopes, snowboards). GROUNDED mode's `floor_stop_on_slope` fights slope movement.
 
+- **`EngineDebugger.register_message_capture` strips prefix** — when you register `register_message_capture("myplugin", callback)`, the callback receives the message WITHOUT the prefix. Sending `"myplugin:screenshot"` from the editor → callback gets `message = "screenshot"`, not `"myplugin:screenshot"`. But `EditorDebuggerPlugin._capture()` on the editor side receives the FULL message including prefix.
+- **Lambda capture by value** — GDScript lambdas capture primitive types (`bool`, `int`, `float`, `String`) by value, not reference. Setting `received = true` inside a lambda does NOT update the outer variable. Use an `Array` as a mutable box: `var state := [false]; var fn = func(): state[0] = true`. Arrays and Dictionaries are captured by reference and mutations are shared.
+- **`call_deferred` vs `add_child` timing** — `_ready()` fires when a node enters the tree via `add_child()`, but during `_enter_tree()` of a parent plugin, the child's `_ready()` may be deferred to the next frame. Use `call_deferred()` for setup that depends on child nodes being fully initialized.
+
 ## Type Inference Errors
 
 Three common issues — applies in both scene builders and runtime scripts:

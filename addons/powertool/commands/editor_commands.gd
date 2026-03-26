@@ -55,7 +55,7 @@ func _get_selected_node(peer_id: int, _params: Dictionary, command_id: String) -
 	if not selection:
 		return _send_success(peer_id, {"selected": false}, command_id)
 
-	var nodes := selection.get_selected_nodes()
+	var nodes = selection.get_selected_nodes()
 	if nodes.is_empty():
 		return _send_success(peer_id, {"selected": false}, command_id)
 

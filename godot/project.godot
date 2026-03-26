@@ -21,6 +21,7 @@ config/icon="res://icon.svg"
 
 GameManager="*res://scripts/autoload/game_manager.gd"
 ScreenshotManager="*res://scripts/screenshot_manager.gd"
+PowerToolGame="*res://addons/powertool/game_autoload.gd"
 
 [display]
 
@@ -30,7 +31,7 @@ window/stretch/mode="canvas_items"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/gut/plugin.cfg")
+enabled=PackedStringArray("res://addons/gut/plugin.cfg", "res://addons/powertool/plugin.cfg")
 
 [input]
 

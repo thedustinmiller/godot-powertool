@@ -1,8 +1,8 @@
-[gd_scene load_steps=2 format=3 uid="uid://bq5x8v3j2t8nx"]
+[gd_scene format=3 uid="uid://bq5x8v3j2t8nx"]
 
-[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://8g6mhvh6fqif" path="res://scripts/main.gd" id="1_main"]
 
-[node name="Main" type="Control"]
+[node name="Main" type="Control" unique_id=601215827]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -11,7 +11,7 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_main")
 
-[node name="ColorRect" type="ColorRect" parent="."]
+[node name="ColorRect" type="ColorRect" parent="." unique_id=2093789778]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
@@ -20,7 +20,7 @@ grow_horizontal = 2
 grow_vertical = 2
 color = Color(0.12, 0.14, 0.18, 1)
 
-[node name="VBoxContainer" type="VBoxContainer" parent="."]
+[node name="VBoxContainer" type="VBoxContainer" parent="." unique_id=92383013]
 layout_mode = 1
 anchors_preset = 8
 anchor_left = 0.5
@@ -36,46 +36,44 @@ grow_vertical = 2
 theme_override_constants/separation = 20
 alignment = 1
 
-[node name="TitleLabel" type="Label" parent="VBoxContainer"]
+[node name="TitleLabel" type="Label" parent="VBoxContainer" unique_id=1260176637]
 layout_mode = 2
 theme_override_font_sizes/font_size = 32
 text = "Godot Template"
 horizontal_alignment = 1
 
-[node name="StatusLabel" type="Label" parent="VBoxContainer"]
+[node name="StatusLabel" type="Label" parent="VBoxContainer" unique_id=1886090598]
 unique_name_in_owner = true
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
 text = "Ready"
 horizontal_alignment = 1
 
-[node name="VersionLabel" type="Label" parent="VBoxContainer"]
+[node name="VersionLabel" type="Label" parent="VBoxContainer" unique_id=626750718]
 unique_name_in_owner = true
 layout_mode = 2
 theme_override_font_sizes/font_size = 14
-text = ""
 horizontal_alignment = 1
 
-[node name="ResultLabel" type="Label" parent="VBoxContainer"]
+[node name="ResultLabel" type="Label" parent="VBoxContainer" unique_id=1281673576]
 unique_name_in_owner = true
 layout_mode = 2
 theme_override_font_sizes/font_size = 16
-text = ""
 horizontal_alignment = 1
 
-[node name="HSeparator" type="HSeparator" parent="VBoxContainer"]
+[node name="HSeparator" type="HSeparator" parent="VBoxContainer" unique_id=1961409876]
 layout_mode = 2
 
-[node name="ButtonContainer" type="HBoxContainer" parent="VBoxContainer"]
+[node name="ButtonContainer" type="HBoxContainer" parent="VBoxContainer" unique_id=1109510208]
 layout_mode = 2
 alignment = 1
 
-[node name="StartButton" type="Button" parent="VBoxContainer/ButtonContainer"]
+[node name="StartButton" type="Button" parent="VBoxContainer/ButtonContainer" unique_id=788442815]
 custom_minimum_size = Vector2(120, 40)
 layout_mode = 2
 text = "Start Game"
 
-[node name="QuitButton" type="Button" parent="VBoxContainer/ButtonContainer"]
+[node name="QuitButton" type="Button" parent="VBoxContainer/ButtonContainer" unique_id=568250210]
 custom_minimum_size = Vector2(120, 40)
 layout_mode = 2
 text = "Quit"

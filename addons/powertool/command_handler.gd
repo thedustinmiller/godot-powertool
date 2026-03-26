@@ -6,6 +6,7 @@ const LOCK_TIMEOUT_MS := 5000
 const LOCK_SWEEP_INTERVAL := 1.0
 
 var _server = null  # WebSocketServer reference
+var _debugger = null  # EditorDebuggerPlugin reference
 var _command_processors: Array = []
 var _locks: Dictionary = {}  # resource_path -> {"peer_id": int, "acquired_at": int}
 var _sweep_timer: float = 0.0
@@ -34,6 +35,13 @@ func set_server(server) -> void:
 	_server = server
 	for proc in _command_processors:
 		proc._server = server
+
+
+func set_debugger(debugger) -> void:
+	_debugger = debugger
+	for proc in _command_processors:
+		if proc.has_method("set_debugger_ref"):
+			proc.set_debugger_ref(debugger)
 
 
 func _init_processors() -> void:
