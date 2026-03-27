@@ -20,7 +20,6 @@ config/icon="res://icon.svg"
 [autoload]
 
 GameManager="*res://scripts/autoload/game_manager.gd"
-ScreenshotManager="*res://scripts/screenshot_manager.gd"
 PowerToolGame="*res://addons/powertool/game_autoload.gd"
 
 [display]

@@ -40,7 +40,7 @@ This project was originally a template that gave a quick start for using Rust as
 | `web/` | Optional Vite frontend + Playwright tests             |
 | `skill/` | Agent knowledge base (GDScript ref, quirks, patterns) |
 | `addons/powertool/` | EditorPlugin addon (WebSocket server, live editor tools) |
-| `scripts/` | GDScript helpers (MCP operations, screenshot capture) |
+| `scripts/` | GDScript helpers (MCP operations) |
 
 ## Configuration
 
@@ -98,7 +98,7 @@ The MCP server provides 30 tools for AI agents to interact with Godot. When the 
 |------|-------------|
 | `get_godot_version` | Get installed Godot version |
 | `launch_editor` / `stop_editor` | Open/close the Godot editor |
-| `run_scene` / `stop_scene` | Run/stop a scene in debug mode |
+| `run_scene_standalone` / `stop_scene_standalone` | Run/stop a scene as a standalone process (outside editor) |
 | `get_debug_output` | Read stdout/stderr from running scene |
 | `list_projects` | Find Godot projects in a directory |
 | `get_project_info` | Get project metadata (scenes, scripts, etc.) |
@@ -119,6 +119,7 @@ The MCP server provides 30 tools for AI agents to interact with Godot. When the 
 | `create_script_editor` / `edit_script_editor` / `get_script_editor` | Script CRUD via editor |
 | `get_editor_state` / `get_selected_node` | Editor state and selection |
 | `execute_editor_script` | Run arbitrary GDScript in the editor |
+| `run_scene` / `stop_scene` | Run/stop a scene via the editor (preferred) |
 | `take_screenshot` | Capture running game (via debugger) or editor viewport |
 
 Multiple agents can connect simultaneously. Mutating commands use transparent per-resource locking with 5s timeout — crashed agents' locks expire automatically.

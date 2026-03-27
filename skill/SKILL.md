@@ -32,11 +32,12 @@ If the Godot MCP server is available, use it for all Godot operations. The MCP s
 - **Scenes**: `create_scene`, `open_scene`, `save_scene`, `get_current_scene`, `get_scene_structure`
 - **Scripts**: `create_script_editor`, `edit_script_editor`, `get_script_editor`
 - **Editor**: `get_editor_state`, `get_selected_node`, `execute_editor_script`
+- **Run/Stop**: `run_scene` / `stop_scene` — launch and stop scenes via the editor (uses EditorInterface, enables debugger-based screenshots)
 - **Screenshots**: `take_screenshot` — captures the running game viewport (via EditorDebuggerPlugin) or the editor viewport
 
-**Headless mode** (fallback): When the editor is not running, tools fall back to spawning headless Godot processes. Slower but works in CI.
+**Headless mode** (fallback): When the editor is not running, tools fall back to spawning headless Godot processes. Slower but works in CI. Use `run_scene_standalone` / `stop_scene_standalone` to run scenes outside the editor.
 
-To play a scene and take screenshots of the running game, use `execute_editor_script` to call `play_main_scene()`, then `take_screenshot` (auto-detects running game).
+To play a scene and take screenshots of the running game, use `run_scene` to launch it via the editor, then `take_screenshot` (auto-detects running game via debugger).
 
 ## API Reference Lookup
 

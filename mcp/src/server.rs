@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 
 use powertool_common::{
     godot as godot_cli,
-    platform::{find_godot_binary, godot_user_data_dir},
+    platform::find_godot_binary,
     project,
 };
 
@@ -202,11 +202,19 @@ struct ProjectPathParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct RunSceneParams {
+struct RunSceneStandaloneParams {
     /// Path to the Godot project directory
     project_path: String,
     /// Specific scene to run (optional, defaults to main scene)
     scene: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RunSceneParams {
+    /// Scene path to run (e.g., "res://scenes/main.tscn"). If omitted, runs the project's main scene.
+    scene: Option<String>,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -215,6 +223,8 @@ struct ListProjectsParams {
     directory: String,
     /// Search recursively in subdirectories
     recursive: Option<bool>,
+    /// Timeout in seconds for the operation (default: 15)
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -305,8 +315,6 @@ struct GetGodotVersionParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct TakeScreenshotParams {
-    /// Path to the Godot project directory (optional, uses running project)
-    project_path: Option<String>,
     /// File path to save screenshot to (optional, returns base64 if not set)
     file_path: Option<String>,
     /// Timeout in seconds for the operation (default: 15)
@@ -465,11 +473,11 @@ impl GodotMcpServer {
         }
     }
 
-    /// Run a Godot scene in debug mode
+    /// Run a Godot scene as a standalone process outside the editor. Only use this if you specifically need to run outside the editor (e.g., for CI or testing without the editor). Prefer run_scene for normal use.
     #[rmcp::tool]
-    async fn run_scene(
+    async fn run_scene_standalone(
         &self,
-        Parameters(params): Parameters<RunSceneParams>,
+        Parameters(params): Parameters<RunSceneStandaloneParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let project = Self::validate_project_path(&params.project_path)?;
 
@@ -533,9 +541,9 @@ impl GodotMcpServer {
         }
     }
 
-    /// Stop the currently running Godot scene
+    /// Stop the standalone Godot scene process. Only needed if the scene was launched with run_scene_standalone.
     #[rmcp::tool]
-    async fn stop_scene(&self) -> Result<CallToolResult, ErrorData> {
+    async fn stop_scene_standalone(&self) -> Result<CallToolResult, ErrorData> {
         let mut active = self.active_process.lock().await;
         match active.take() {
             Some(mut proc) => {
@@ -569,7 +577,17 @@ impl GodotMcpServer {
             ));
         }
 
-        let projects = project::find_projects(&dir, params.recursive.unwrap_or(false));
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let recursive = params.recursive.unwrap_or(false);
+        let dir_clone = dir.clone();
+        let projects = tokio::time::timeout(
+            timeout,
+            tokio::task::spawn_blocking(move || project::find_projects(&dir_clone, recursive)),
+        )
+        .await
+        .map_err(|_| ErrorData::internal_error("list_projects timed out", None))?
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
         let result: Vec<serde_json::Value> = projects
             .iter()
             .map(|p| {
@@ -592,8 +610,16 @@ impl GodotMcpServer {
         Parameters(params): Parameters<ProjectPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let project = Self::validate_project_path(&params.project_path)?;
-        let info = project::get_project_info(&project)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let project_clone = project.clone();
+        let info = tokio::time::timeout(
+            timeout,
+            tokio::task::spawn_blocking(move || project::get_project_info(&project_clone)),
+        )
+        .await
+        .map_err(|_| ErrorData::internal_error("get_project_info timed out", None))?
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let result = serde_json::json!({
             "name": info.name,
@@ -1010,110 +1036,74 @@ impl GodotMcpServer {
         )]))
     }
 
-    /// Take a screenshot of the editor viewport or running project
+    /// Run a scene via the Godot editor. Requires the editor to be running with the PowerTool addon. If no scene path is given, runs the project's main scene.
+    #[rmcp::tool]
+    async fn run_scene(
+        &self,
+        Parameters(params): Parameters<RunSceneParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor().await?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let mut p = serde_json::json!({});
+        if let Some(ref scene) = params.scene {
+            p["scene"] = serde_json::json!(scene);
+        }
+        let result = self.run_via_editor("run_scene", p, timeout).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Stop the scene currently running in the Godot editor.
+    #[rmcp::tool]
+    async fn stop_scene(
+        &self,
+        Parameters(params): Parameters<EditorTimeoutParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor().await?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor("stop_scene", serde_json::json!({}), timeout)
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Take a screenshot of the running game viewport or editor viewport. Requires the editor to be running with the PowerTool addon.
     #[rmcp::tool]
     async fn take_screenshot(
         &self,
         Parameters(params): Parameters<TakeScreenshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Try editor WebSocket path first
-        if self.editor.is_connected() {
-            let timeout = Self::timeout_from(params.timeout_seconds);
-            let result = self
-                .run_via_editor("take_screenshot", serde_json::json!({}), timeout)
-                .await?;
+        self.require_editor().await?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor("take_screenshot", serde_json::json!({}), timeout)
+            .await?;
 
-            // Editor returns base64 PNG in result.image_base64
-            if let Some(b64) = result.get("image_base64").and_then(|v| v.as_str()) {
-                if let Some(ref save_path) = params.file_path {
-                    use base64::Engine;
-                    let data = base64::engine::general_purpose::STANDARD
-                        .decode(b64)
-                        .map_err(|e| ErrorData::internal_error(format!("Base64 decode error: {e}"), None))?;
-                    fs::write(save_path, &data)
-                        .map_err(|e| ErrorData::internal_error(format!("Failed to save: {e}"), None))?;
-                    return Ok(CallToolResult::success(vec![Content::text(format!(
-                        "Screenshot saved to: {save_path}"
-                    ))]));
-                }
-                return Ok(CallToolResult::success(vec![Content::image(
-                    b64.to_string(),
-                    "image/png",
-                )]));
+        // Editor returns base64 PNG in result.image_base64
+        if let Some(b64) = result.get("image_base64").and_then(|v| v.as_str()) {
+            if let Some(ref save_path) = params.file_path {
+                use base64::Engine;
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| ErrorData::internal_error(format!("Base64 decode error: {e}"), None))?;
+                fs::write(save_path, &data)
+                    .map_err(|e| ErrorData::internal_error(format!("Failed to save: {e}"), None))?;
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Screenshot saved to: {save_path}"
+                ))]));
             }
-
-            return Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&result).unwrap_or_default(),
+            return Ok(CallToolResult::success(vec![Content::image(
+                b64.to_string(),
+                "image/png",
             )]));
         }
 
-        // Fallback: file-polling with running project
-        // Must have a running project
-        {
-            let active = self.active_process.lock().await;
-            if active.is_none() {
-                return Err(ErrorData::invalid_params(
-                    "No Godot project is currently running and editor is not connected.",
-                    None,
-                ));
-            }
-        }
-
-        // Determine project name for user data dir
-        let project_path = params.project_path.as_deref().unwrap_or(".");
-        let project_dir = PathBuf::from(project_path);
-        let project_name = if project_dir.join("project.godot").exists() {
-            project::parse_project_name(&project_dir.join("project.godot"))
-                .unwrap_or_else(|_| "Unknown Project".to_string())
-        } else {
-            "Unknown Project".to_string()
-        };
-
-        let user_dir = godot_user_data_dir(&project_name);
-        fs::create_dir_all(&user_dir)
-            .map_err(|e| ErrorData::internal_error(format!("Failed to create user dir: {e}"), None))?;
-
-        let request_file = user_dir.join("mcp_screenshot_request.txt");
-        let output_file = user_dir.join("mcp_screenshot.png");
-
-        // Remove existing screenshot
-        let _ = fs::remove_file(&output_file);
-
-        // Write request
-        fs::write(&request_file, "take_screenshot")
-            .map_err(|e| ErrorData::internal_error(format!("Failed to write request: {e}"), None))?;
-
-        // Poll for result (5 second timeout, 100ms intervals)
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if output_file.exists() {
-                break;
-            }
-        }
-
-        if !output_file.exists() {
-            return Err(ErrorData::internal_error(
-                "Screenshot request timed out. Make sure the ScreenshotManager autoload is installed.",
-                None,
-            ));
-        }
-
-        let img_data = fs::read(&output_file)
-            .map_err(|e| ErrorData::internal_error(format!("Failed to read screenshot: {e}"), None))?;
-
-        // If file path specified, save there
-        if let Some(ref save_path) = params.file_path {
-            fs::write(save_path, &img_data)
-                .map_err(|e| ErrorData::internal_error(format!("Failed to save screenshot: {e}"), None))?;
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "Screenshot saved to: {save_path}"
-            ))]));
-        }
-
-        // Return as base64 image
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&img_data);
-        Ok(CallToolResult::success(vec![Content::image(b64, "image/png")]))
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
     }
 }
 

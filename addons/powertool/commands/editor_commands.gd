@@ -13,6 +13,12 @@ func process_command(peer_id: int, command_type: String, params: Dictionary, com
 		"execute_editor_script":
 			_execute_editor_script(peer_id, params, command_id)
 			return true
+		"run_scene":
+			_run_scene(peer_id, params, command_id)
+			return true
+		"stop_scene":
+			_stop_scene(peer_id, params, command_id)
+			return true
 	return false
 
 
@@ -71,6 +77,42 @@ func _get_selected_node(peer_id: int, _params: Dictionary, command_id: String) -
 		"type": node.get_class(),
 		"path": str(node.get_path()),
 		"properties": props,
+	}, command_id)
+
+
+func _run_scene(peer_id: int, params: Dictionary, command_id: String) -> void:
+	var ei = _get_editor_interface()
+	if not ei:
+		return _send_error(peer_id, "EditorInterface not available", command_id)
+
+	if ei.is_playing_scene():
+		return _send_error(peer_id, "A scene is already running. Stop it first with stop_scene.", command_id, "ALREADY_PLAYING")
+
+	var scene_path: String = params.get("scene", "")
+	if scene_path.is_empty():
+		ei.play_main_scene()
+	else:
+		ei.play_custom_scene(scene_path)
+
+	_send_success(peer_id, {
+		"message": "Scene launched",
+		"scene": scene_path if not scene_path.is_empty() else "(main scene)",
+	}, command_id)
+
+
+func _stop_scene(peer_id: int, _params: Dictionary, command_id: String) -> void:
+	var ei = _get_editor_interface()
+	if not ei:
+		return _send_error(peer_id, "EditorInterface not available", command_id)
+
+	if not ei.is_playing_scene():
+		return _send_success(peer_id, {
+			"message": "No scene was running",
+		}, command_id)
+
+	ei.stop_playing_scene()
+	_send_success(peer_id, {
+		"message": "Scene stopped",
 	}, command_id)
 
 
