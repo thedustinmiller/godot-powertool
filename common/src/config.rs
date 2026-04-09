@@ -5,42 +5,19 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct TemplateConfig {
-    #[serde(default)]
-    pub versions: Versions,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct Versions {
     #[serde(default = "default_godot")]
     pub godot: String,
-    #[serde(default = "default_gut")]
-    pub gut: String,
-    #[serde(default = "default_mcp")]
-    pub mcp: String,
-    #[serde(default = "default_skill")]
-    pub skill: String,
     #[serde(default)]
-    pub docs: Option<String>,
+    pub assets: Vec<Asset>,
 }
 
-impl Versions {
-    /// Returns the docs version, falling back to the godot version.
-    pub fn docs_version(&self) -> &str {
-        self.docs.as_deref().unwrap_or(&self.godot)
-    }
+#[derive(Debug, Deserialize, Clone)]
+pub struct Asset {
+    pub url: String,
 }
 
 fn default_godot() -> String {
     "4.6.1".to_string()
-}
-fn default_gut() -> String {
-    "9.6.0".to_string()
-}
-fn default_mcp() -> String {
-    "0.1.0".to_string()
-}
-fn default_skill() -> String {
-    "0.1.0".to_string()
 }
 
 /// Load `template.toml` from a project root directory.

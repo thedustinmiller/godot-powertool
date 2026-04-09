@@ -1,7 +1,5 @@
-# Template configuration — versions used by `cargo xtask setup`
-[versions]
+# Template configuration — Godot version and assets used by `cargo xtask`
 godot = "4.6.1"
-gut = "9.6.0"
-mcp = "0.1.0"
-skill = "0.1.0"
-docs = "4.6.1"
+
+[[assets]]
+url = "https://github.com/bitwes/Gut/releases/download/v9.6.0/gut-9.6.0.zip"

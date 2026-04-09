@@ -34,23 +34,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Full project setup - Godot, GUT, API docs, skill files, MCP server
+    /// First-time project setup — downloads Godot, assets, and configures all tooling
+    Init {
+        /// Godot version to download (overrides template.toml)
+        #[arg(long)]
+        godot_version: Option<String>,
+
+        /// Skill install target: claude, codex, generic, or a custom path
+        #[arg(long, default_value = "claude")]
+        skill_target: String,
+    },
+
+    /// Re-setup tooling — Godot (version-aware), extension, import, docs, skill, MCP
     Setup {
         /// Godot version to download (overrides template.toml)
         #[arg(long)]
         godot_version: Option<String>,
 
-        /// GUT version to download (overrides template.toml)
-        #[arg(long)]
-        gut_version: Option<String>,
-
         /// Skip Godot download (use system Godot)
         #[arg(long)]
         skip_godot: bool,
-
-        /// Skip GUT test framework download
-        #[arg(long)]
-        skip_gut: bool,
 
         /// Skip generating Godot API docs
         #[arg(long)]
@@ -68,6 +71,9 @@ enum Commands {
         #[arg(long, default_value = "claude")]
         skill_target: String,
     },
+
+    /// Fetch and extract assets from template.toml into the project
+    Update,
 
     /// Build the GDExtension library
     Build {
@@ -116,7 +122,7 @@ enum Commands {
 
     /// Clean build artifacts
     Clean {
-        /// Also remove downloaded tools (Godot, GUT)
+        /// Also remove downloaded tools (Godot)
         #[arg(long)]
         all: bool,
     },
@@ -267,29 +273,36 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Init {
+            godot_version,
+            skill_target,
+        } => {
+            let config = load_template_config(&project_root()?)?;
+            let godot_v = godot_version.unwrap_or(config.godot.clone());
+            cmd_init(&godot_v, &skill_target, &config.assets)
+        },
         Commands::Setup {
             godot_version,
-            gut_version,
             skip_godot,
-            skip_gut,
             skip_docs,
             skip_skill,
             skip_mcp,
             skill_target,
         } => {
             let config = load_template_config(&project_root()?)?;
-            let godot_v = godot_version.unwrap_or(config.versions.godot.clone());
-            let gut_v = gut_version.unwrap_or(config.versions.gut.clone());
+            let godot_v = godot_version.unwrap_or(config.godot.clone());
             cmd_setup(&SetupOptions {
                 godot_version: godot_v,
-                gut_version: gut_v,
                 skip_godot,
-                skip_gut,
                 skip_docs,
                 skip_skill,
                 skip_mcp,
                 skill_target,
             })
+        },
+        Commands::Update => {
+            let config = load_template_config(&project_root()?)?;
+            cmd_update(&config.assets)
         },
         Commands::Build {
             release,
@@ -401,34 +414,140 @@ fn extension_enabled() -> bool {
 
 struct SetupOptions {
     godot_version: String,
-    gut_version: String,
     skip_godot: bool,
-    skip_gut: bool,
     skip_docs: bool,
     skip_skill: bool,
     skip_mcp: bool,
     skill_target: String,
 }
 
-fn cmd_setup(opts: &SetupOptions) -> Result<()> {
-    println!("Setting up project...\n");
+// =============================================================================
+// User prompts
+// =============================================================================
+
+/// Prompt the user for y/n confirmation. Returns true on 'y'.
+fn confirm_prompt(message: &str) -> Result<bool> {
+    eprint!("{message} [y/n]: ");
+    let mut input = String::new();
+    io::stdin().lock().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
+/// Prompt the user for y/n/s. Returns the lowercase char. Loops on invalid input.
+fn confirm_prompt_yns(message: &str) -> Result<char> {
+    loop {
+        eprint!("{message} [y/n/s]: ");
+        let mut input = String::new();
+        io::stdin().lock().read_line(&mut input)?;
+        match input.trim().to_ascii_lowercase().chars().next() {
+            Some(c @ ('y' | 'n' | 's')) => return Ok(c),
+            _ => eprintln!("Please enter y, n, or s."),
+        }
+    }
+}
+
+// =============================================================================
+// Asset zip helpers
+// =============================================================================
+
+/// Collect file paths in a zip that already exist at `dest`.
+fn check_zip_conflicts(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>, dest: &Path) -> Vec<String> {
+    let mut conflicts = Vec::new();
+    for i in 0..archive.len() {
+        if let Ok(entry) = archive.by_index(i) {
+            let name = entry.name().to_string();
+            if !name.ends_with('/') && dest.join(&name).exists() {
+                conflicts.push(name);
+            }
+        }
+    }
+    conflicts
+}
+
+/// Extract a zip archive into `dest`. If `skip_existing` is true, files that
+/// already exist at the destination are left untouched. Returns the number of
+/// files written.
+fn extract_zip_to(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    dest: &Path,
+    skip_existing: bool,
+) -> Result<u64> {
+    let mut count = 0u64;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let name = entry.name().to_string();
+        let outpath = dest.join(&name);
+
+        if name.ends_with('/') {
+            fs::create_dir_all(&outpath)?;
+        } else {
+            if skip_existing && outpath.exists() {
+                continue;
+            }
+            if let Some(p) = outpath.parent() {
+                fs::create_dir_all(p)?;
+            }
+            let mut outfile = fs::File::create(&outpath)?;
+            io::copy(&mut entry, &mut outfile)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Download a zip from `url` and return the bytes.
+fn download_zip(url: &str) -> Result<Vec<u8>> {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(ProgressStyle::default_spinner().template("{spinner:.green} {msg}")?);
+    pb.set_message(format!("Downloading {url}..."));
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let response = reqwest::blocking::get(url)
+        .with_context(|| format!("Failed to download {url}"))?;
+
+    if !response.status().is_success() {
+        bail!("Failed to download {url}: HTTP {}", response.status().as_u16());
+    }
+
+    let bytes = response.bytes()?.to_vec();
+    pb.finish_with_message("Download complete");
+    Ok(bytes)
+}
+
+// =============================================================================
+// Commands
+// =============================================================================
+
+fn cmd_init(
+    godot_version: &str,
+    skill_target: &str,
+    assets: &[powertool_common::config::Asset],
+) -> Result<()> {
+    println!("=== First-time project setup ===\n");
+    println!("This will download Godot, fetch all assets, and configure tooling.");
+    println!("Existing files in the project may be overwritten.\n");
+
+    if !confirm_prompt("Continue?")? {
+        println!("Aborted.");
+        return Ok(());
+    }
 
     let root = project_root()?;
     let tools = tools_dir()?;
     fs::create_dir_all(&tools)?;
 
     // --- 1. Godot engine ---
-    if !opts.skip_godot {
-        download_godot(&opts.godot_version, &tools)?;
-    } else {
-        println!("Skipping Godot download (--skip-godot)");
-    }
+    download_godot(godot_version, &tools)?;
 
-    // --- 2. GUT test framework ---
-    if !opts.skip_gut {
-        download_gut(&opts.gut_version)?;
-    } else {
-        println!("Skipping GUT download (--skip-gut)");
+    // --- 2. Assets (e.g. GUT) — before import so addons are present ---
+    let dest = godot_dir()?;
+    for asset in assets {
+        println!("\nFetching asset: {}", asset.url);
+        let bytes = download_zip(&asset.url)?;
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor)?;
+        let count = extract_zip_to(&mut archive, &dest, false)?;
+        println!("Extracted {count} files");
     }
 
     // --- 3. Build GDExtension (only if enabled in workspace) ---
@@ -453,6 +572,95 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     }
 
     // --- 5. Generate API docs ---
+    println!("\n=== Generating Godot API docs ===\n");
+    let status = Command::new("cargo")
+        .args(["run", "-p", "powertool-docs", "--release", "--", "generate"])
+        .current_dir(&root)
+        .status()
+        .context("Failed to run doc generator")?;
+
+    if !status.success() {
+        eprintln!("Warning: Doc generation failed. You can retry with:");
+        eprintln!("  cargo run -p powertool-docs -- generate");
+    }
+
+    // --- 6. Install skill files ---
+    println!("\n=== Installing skill files ===\n");
+    match cmd_skill_install(skill_target) {
+        Ok(()) => {},
+        Err(e) => {
+            eprintln!("Warning: Skill install failed: {e}");
+            eprintln!("  You can retry with: cargo xtask skill install");
+        }
+    }
+
+    // --- 7. Build MCP server ---
+    println!("\n=== Building MCP server ===\n");
+    let status = Command::new("cargo")
+        .args(["build", "-p", "powertool-mcp", "--release"])
+        .current_dir(&root)
+        .status()
+        .context("Failed to build MCP server")?;
+
+    if status.success() {
+        let mcp_bin = root.join("target").join("release").join("powertool-mcp");
+        println!("MCP server built: {}", mcp_bin.display());
+    } else {
+        eprintln!("Warning: MCP server build failed. You can retry with:");
+        eprintln!("  cargo build -p powertool-mcp --release");
+    }
+
+    // --- Done ---
+    println!("\n=== Init complete! ===\n");
+    println!("  cargo xtask editor         # Open Godot editor");
+    println!("  cargo xtask run            # Run the game");
+    println!("  cargo xtask test           # Run all tests");
+
+    let mcp_bin = root.join("target").join("release").join("powertool-mcp");
+    println!(
+        "  claude mcp add godot -- {}  # Add MCP server to Claude Code",
+        mcp_bin.display()
+    );
+
+    Ok(())
+}
+
+fn cmd_setup(opts: &SetupOptions) -> Result<()> {
+    println!("Setting up project tooling...\n");
+
+    let root = project_root()?;
+    let tools = tools_dir()?;
+    fs::create_dir_all(&tools)?;
+
+    // --- 1. Godot engine (version-aware) ---
+    if !opts.skip_godot {
+        download_godot(&opts.godot_version, &tools)?;
+    } else {
+        println!("Skipping Godot download (--skip-godot)");
+    }
+
+    // --- 2. Build GDExtension (only if enabled in workspace) ---
+    if extension_enabled() {
+        println!("\nBuilding GDExtension...");
+        cmd_build(false, false, false)?;
+    }
+
+    // --- 3. Initialize Godot project ---
+    println!("\nInitializing Godot project...");
+    let godot = godot_binary()?;
+    let godot_path = godot_dir()?;
+
+    let status = Command::new(&godot)
+        .args(["--headless", "--import"])
+        .current_dir(&godot_path)
+        .status()
+        .context("Failed to initialize Godot project")?;
+
+    if !status.success() {
+        bail!("Godot project initialization failed");
+    }
+
+    // --- 4. Generate API docs ---
     if !opts.skip_docs {
         println!("\n=== Generating Godot API docs ===\n");
         let status = Command::new("cargo")
@@ -469,7 +677,7 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         println!("\nSkipping API doc generation (--skip-docs)");
     }
 
-    // --- 6. Install skill files ---
+    // --- 5. Install skill files ---
     if !opts.skip_skill {
         println!("\n=== Installing skill files ===\n");
         match cmd_skill_install(&opts.skill_target) {
@@ -483,7 +691,7 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         println!("\nSkipping skill install (--skip-skill)");
     }
 
-    // --- 7. Build MCP server ---
+    // --- 6. Build MCP server ---
     if !opts.skip_mcp {
         println!("\n=== Building MCP server ===\n");
         let status = Command::new("cargo")
@@ -520,35 +728,90 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     Ok(())
 }
 
+fn cmd_update(assets: &[powertool_common::config::Asset]) -> Result<()> {
+    if assets.is_empty() {
+        println!("No assets configured in template.toml");
+        return Ok(());
+    }
+
+    let dest = godot_dir()?;
+
+    for asset in assets {
+        println!("\nFetching asset: {}", asset.url);
+        let bytes = download_zip(&asset.url)?;
+        let cursor = std::io::Cursor::new(bytes.clone());
+        let mut archive = zip::ZipArchive::new(cursor)?;
+
+        let mut total_files = 0usize;
+        for i in 0..archive.len() {
+            if let Ok(entry) = archive.by_index(i) {
+                if !entry.name().ends_with('/') {
+                    total_files += 1;
+                }
+            }
+        }
+        let conflicts = check_zip_conflicts(&mut archive, &dest);
+
+        if conflicts.is_empty() {
+            println!("{total_files} files, no conflicts — extracting...");
+            let cursor = std::io::Cursor::new(bytes);
+            let mut archive = zip::ZipArchive::new(cursor)?;
+            let count = extract_zip_to(&mut archive, &dest, false)?;
+            println!("Extracted {count} files");
+        } else {
+            println!("{total_files} files, {} conflict(s) with existing files:", conflicts.len());
+            for (i, path) in conflicts.iter().enumerate() {
+                if i >= 10 {
+                    println!("  ... and {} more", conflicts.len() - 10);
+                    break;
+                }
+                println!("  {path}");
+            }
+
+            let choice = confirm_prompt_yns("Overwrite all (y), cancel (n), or extract only new files (s)?")?;
+            match choice {
+                'y' => {
+                    let cursor = std::io::Cursor::new(bytes);
+                    let mut archive = zip::ZipArchive::new(cursor)?;
+                    let count = extract_zip_to(&mut archive, &dest, false)?;
+                    println!("Extracted {count} files (overwrote conflicts)");
+                },
+                's' => {
+                    let cursor = std::io::Cursor::new(bytes);
+                    let mut archive = zip::ZipArchive::new(cursor)?;
+                    let count = extract_zip_to(&mut archive, &dest, true)?;
+                    println!("Extracted {count} new files (skipped existing)");
+                },
+                _ => {
+                    println!("Skipped.");
+                },
+            }
+        }
+    }
+
+    println!("\n=== Update complete! ===");
+    Ok(())
+}
+
 fn download_godot(version: &str, tools_dir: &Path) -> Result<()> {
     let godot_dir = tools_dir.join("godot");
+    let stamp_path = godot_dir.join(".version");
 
-    if godot_dir.join("godot").exists() {
-        println!("Godot already installed at {}", godot_dir.display());
-        return Ok(());
+    // Version-aware skip: only skip if the installed version matches
+    if let Ok(installed) = fs::read_to_string(&stamp_path) {
+        if installed.trim() == version {
+            println!("Godot {version} already installed at {}", godot_dir.display());
+            return Ok(());
+        }
+        println!("Godot version changed ({} -> {version}), re-downloading...", installed.trim());
+        fs::remove_dir_all(&godot_dir)?;
     }
 
     println!("Downloading Godot {version}...");
 
     let (url, binary_name) = godot_download_info(version);
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(ProgressStyle::default_spinner().template("{spinner:.green} {msg}")?);
-    pb.set_message("Downloading...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
-    let response = reqwest::blocking::get(&url)
-        .with_context(|| format!("Failed to download Godot from {url}"))?;
-
-    if !response.status().is_success() {
-        bail!(
-            "Failed to download Godot: HTTP {}",
-            response.status().as_u16()
-        );
-    }
-
-    let bytes = response.bytes()?;
-    pb.finish_with_message("Download complete");
+    let bytes = download_zip(&url)?;
 
     println!("Extracting Godot...");
     fs::create_dir_all(&godot_dir)?;
@@ -586,110 +849,10 @@ fn download_godot(version: &str, tools_dir: &Path) -> Result<()> {
         fs::set_permissions(&final_path, perms)?;
     }
 
-    println!("Godot installed to {}", final_path.display());
-    Ok(())
-}
+    // Write version stamp
+    fs::write(&stamp_path, version)?;
 
-fn download_gut(version: &str) -> Result<()> {
-    let gut_dir = godot_dir()?.join("addons").join("gut");
-
-    if gut_dir.exists() {
-        println!("GUT already installed at {}", gut_dir.display());
-        return Ok(());
-    }
-
-    println!("Downloading GUT {version}...");
-
-    let asset_url =
-        format!("https://github.com/bitwes/Gut/releases/download/v{version}/gut-{version}.zip");
-    let zipball_url = format!("https://api.github.com/repos/bitwes/Gut/zipball/v{version}");
-
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(ProgressStyle::default_spinner().template("{spinner:.green} {msg}")?);
-    pb.set_message("Downloading...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
-    let (bytes, from_zipball) = match reqwest::blocking::get(&asset_url) {
-        Ok(response) if response.status().is_success() => (response.bytes()?, false),
-        _ => {
-            pb.set_message("Trying GitHub API...");
-            let client = reqwest::blocking::Client::new();
-            let response = client
-                .get(&zipball_url)
-                .header("Accept", "application/vnd.github+json")
-                .header("User-Agent", "godot-powertool-xtask")
-                .send()
-                .with_context(|| format!("Failed to download GUT from {zipball_url}"))?;
-
-            if !response.status().is_success() {
-                bail!(
-                    "Failed to download GUT: HTTP {}",
-                    response.status().as_u16()
-                );
-            }
-            (response.bytes()?, true)
-        },
-    };
-
-    pb.finish_with_message("Download complete");
-
-    println!("Extracting GUT...");
-    let addons_dir = godot_dir()?.join("addons");
-    fs::create_dir_all(&addons_dir)?;
-
-    let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor)?;
-
-    if from_zipball {
-        let prefix = archive
-            .by_index(0)?
-            .name()
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .to_string();
-
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            let name = file.name();
-
-            let expected_prefix = format!("{prefix}/addons/");
-            if let Some(rel_path) = name.strip_prefix(&expected_prefix) {
-                let outpath = addons_dir.join(rel_path);
-
-                if name.ends_with('/') {
-                    fs::create_dir_all(&outpath)?;
-                } else {
-                    if let Some(p) = outpath.parent() {
-                        fs::create_dir_all(p)?;
-                    }
-                    let mut outfile = fs::File::create(&outpath)?;
-                    io::copy(&mut file, &mut outfile)?;
-                }
-            }
-        }
-    } else {
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            let name = file.name();
-
-            if let Some(rel_path) = name.strip_prefix("addons/") {
-                let outpath = addons_dir.join(rel_path);
-
-                if name.ends_with('/') {
-                    fs::create_dir_all(&outpath)?;
-                } else {
-                    if let Some(p) = outpath.parent() {
-                        fs::create_dir_all(p)?;
-                    }
-                    let mut outfile = fs::File::create(&outpath)?;
-                    io::copy(&mut file, &mut outfile)?;
-                }
-            }
-        }
-    }
-
-    println!("GUT installed to {}", gut_dir.display());
+    println!("Godot {version} installed to {}", final_path.display());
     Ok(())
 }
 
@@ -1062,12 +1225,6 @@ fn cmd_clean(all: bool) -> Result<()> {
         if tools.exists() {
             println!("Removing tools directory...");
             fs::remove_dir_all(&tools)?;
-        }
-
-        let gut_dir = godot_dir()?.join("addons").join("gut");
-        if gut_dir.exists() {
-            println!("Removing GUT...");
-            fs::remove_dir_all(&gut_dir)?;
         }
     }
 

@@ -94,7 +94,7 @@ fn cmd_generate(
         v
     } else {
         let config = powertool_common::config::load_template_config(&root)?;
-        config.versions.docs_version().to_string()
+        config.godot.clone()
     };
 
     // Fetch XML docs if needed
