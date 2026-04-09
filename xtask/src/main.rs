@@ -387,6 +387,19 @@ fn extension_bin_dir() -> Result<PathBuf> {
         .join(extension_platform_dir()))
 }
 
+/// Copy the contents of `<root>/addons/` into `<root>/godot/addons/`.
+fn copy_addons(root: &Path) -> Result<()> {
+    let src = root.join("addons");
+    if !src.exists() {
+        return Ok(());
+    }
+    let dst = root.join("godot").join("addons");
+    fs::create_dir_all(&dst)?;
+    println!("Copying addons into godot/addons/...");
+    copy_dir_recursive(&src, &dst)?;
+    Ok(())
+}
+
 /// Check if "extension" is listed in workspace members in root Cargo.toml.
 fn extension_enabled() -> bool {
     let Ok(root) = project_root() else {
@@ -450,12 +463,40 @@ fn confirm_prompt_yns(message: &str) -> Result<char> {
 // Asset zip helpers
 // =============================================================================
 
+/// Strip the top-level directory component from a zip entry name.
+/// e.g. "Gut-9.6.0/addons/gut/plugin.cfg" -> "addons/gut/plugin.cfg"
+/// Returns `None` for the root directory entry itself.
+fn strip_root_component(name: &str) -> Option<&str> {
+    let rest = if let Some(idx) = name.find('/') {
+        &name[idx + 1..]
+    } else {
+        return None; // bare file at root level with no slash — keep as-is shouldn't happen
+    };
+    if rest.is_empty() {
+        None // this was the root dir entry itself (e.g. "Gut-9.6.0/")
+    } else {
+        Some(rest)
+    }
+}
+
 /// Collect file paths in a zip that already exist at `dest`.
-fn check_zip_conflicts(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>, dest: &Path) -> Vec<String> {
+fn check_zip_conflicts(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    dest: &Path,
+    strip_root: bool,
+) -> Vec<String> {
     let mut conflicts = Vec::new();
     for i in 0..archive.len() {
         if let Ok(entry) = archive.by_index(i) {
-            let name = entry.name().to_string();
+            let raw_name = entry.name().to_string();
+            let name = if strip_root {
+                match strip_root_component(&raw_name) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                }
+            } else {
+                raw_name
+            };
             if !name.ends_with('/') && dest.join(&name).exists() {
                 conflicts.push(name);
             }
@@ -465,17 +506,29 @@ fn check_zip_conflicts(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>, 
 }
 
 /// Extract a zip archive into `dest`. If `skip_existing` is true, files that
-/// already exist at the destination are left untouched. Returns the number of
-/// files written.
+/// already exist at the destination are left untouched. When `strip_root` is
+/// true, the top-level directory in the archive is stripped before extracting.
+/// Returns the number of files written.
 fn extract_zip_to(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     dest: &Path,
     skip_existing: bool,
+    strip_root: bool,
 ) -> Result<u64> {
     let mut count = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_string();
+        let raw_name = entry.name().to_string();
+
+        let name = if strip_root {
+            match strip_root_component(&raw_name) {
+                Some(n) => n.to_string(),
+                None => continue,
+            }
+        } else {
+            raw_name
+        };
+
         let outpath = dest.join(&name);
 
         if name.ends_with('/') {
@@ -539,18 +592,21 @@ fn cmd_init(
     // --- 1. Godot engine ---
     download_godot(godot_version, &tools)?;
 
-    // --- 2. Assets (e.g. GUT) — before import so addons are present ---
+    // --- 2. Copy repo addons into project ---
+    copy_addons(&root)?;
+
+    // --- 3. Assets (e.g. GUT) — before import so addons are present ---
     let dest = godot_dir()?;
     for asset in assets {
         println!("\nFetching asset: {}", asset.url);
         let bytes = download_zip(&asset.url)?;
         let cursor = std::io::Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor)?;
-        let count = extract_zip_to(&mut archive, &dest, false)?;
+        let count = extract_zip_to(&mut archive, &dest, false, asset.strip_root)?;
         println!("Extracted {count} files");
     }
 
-    // --- 3. Build GDExtension (only if enabled in workspace) ---
+    // --- 4. Build GDExtension (only if enabled in workspace) ---
     if extension_enabled() {
         println!("\nBuilding GDExtension...");
         cmd_build(false, false, false)?;
@@ -639,7 +695,10 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         println!("Skipping Godot download (--skip-godot)");
     }
 
-    // --- 2. Build GDExtension (only if enabled in workspace) ---
+    // --- 2. Copy repo addons into project ---
+    copy_addons(&root)?;
+
+    // --- 3. Build GDExtension (only if enabled in workspace) ---
     if extension_enabled() {
         println!("\nBuilding GDExtension...");
         cmd_build(false, false, false)?;
@@ -742,21 +801,32 @@ fn cmd_update(assets: &[powertool_common::config::Asset]) -> Result<()> {
         let cursor = std::io::Cursor::new(bytes.clone());
         let mut archive = zip::ZipArchive::new(cursor)?;
 
+        let strip = asset.strip_root;
+
         let mut total_files = 0usize;
         for i in 0..archive.len() {
             if let Ok(entry) = archive.by_index(i) {
-                if !entry.name().ends_with('/') {
+                let raw = entry.name().to_string();
+                let name = if strip {
+                    match strip_root_component(&raw) {
+                        Some(n) => n.to_string(),
+                        None => continue,
+                    }
+                } else {
+                    raw
+                };
+                if !name.ends_with('/') {
                     total_files += 1;
                 }
             }
         }
-        let conflicts = check_zip_conflicts(&mut archive, &dest);
+        let conflicts = check_zip_conflicts(&mut archive, &dest, strip);
 
         if conflicts.is_empty() {
             println!("{total_files} files, no conflicts — extracting...");
             let cursor = std::io::Cursor::new(bytes);
             let mut archive = zip::ZipArchive::new(cursor)?;
-            let count = extract_zip_to(&mut archive, &dest, false)?;
+            let count = extract_zip_to(&mut archive, &dest, false, strip)?;
             println!("Extracted {count} files");
         } else {
             println!("{total_files} files, {} conflict(s) with existing files:", conflicts.len());
@@ -773,13 +843,13 @@ fn cmd_update(assets: &[powertool_common::config::Asset]) -> Result<()> {
                 'y' => {
                     let cursor = std::io::Cursor::new(bytes);
                     let mut archive = zip::ZipArchive::new(cursor)?;
-                    let count = extract_zip_to(&mut archive, &dest, false)?;
+                    let count = extract_zip_to(&mut archive, &dest, false, strip)?;
                     println!("Extracted {count} files (overwrote conflicts)");
                 },
                 's' => {
                     let cursor = std::io::Cursor::new(bytes);
                     let mut archive = zip::ZipArchive::new(cursor)?;
-                    let count = extract_zip_to(&mut archive, &dest, true)?;
+                    let count = extract_zip_to(&mut archive, &dest, true, strip)?;
                     println!("Extracted {count} new files (skipped existing)");
                 },
                 _ => {

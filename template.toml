@@ -3,3 +3,4 @@ godot = "4.6.1"
 
 [[assets]]
 url = "https://github.com/bitwes/Gut/releases/download/v9.6.0/gut-9.6.0.zip"
+strip_root = true

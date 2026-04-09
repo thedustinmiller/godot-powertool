@@ -14,6 +14,10 @@ pub struct TemplateConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Asset {
     pub url: String,
+    /// Strip the top-level directory from the zip before extracting.
+    /// Useful for GitHub release zips that wrap everything in a `Name-version/` folder.
+    #[serde(default)]
+    pub strip_root: bool,
 }
 
 fn default_godot() -> String {
