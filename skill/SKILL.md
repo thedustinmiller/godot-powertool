@@ -1,9 +1,8 @@
 ---
 name: godot-powertool
 description: |
-  Godot development assistant — GDScript expertise, scene/script generation patterns, and API reference.
-  TRIGGER when: working in a Godot project (any directory with project.godot), writing GDScript (.gd files), editing .tscn scenes, or using Godot MCP tools.
-  DO NOT TRIGGER when: the task has nothing to do with Godot or game development.
+  Godot Engine and GDScript development reference. Use when working with Godot projects, writing or editing GDScript (.gd files), editing .tscn scenes, or using Godot MCP tools. Provides GDScript syntax, type system, scene/script generation patterns, known quirks, and Godot API reference.
+  DO NOT USE when the task has nothing to do with Godot or game development.
 ---
 
 # Godot Powertool Skill

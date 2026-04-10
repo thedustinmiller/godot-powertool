@@ -17,6 +17,14 @@ func _on_editor_message(message: String, data: Array) -> bool:
 		"get_scene_tree":
 			_send_scene_tree()
 			return true
+		"pause":
+			get_tree().paused = true
+			EngineDebugger.send_message("powertool:paused", [])
+			return true
+		"resume":
+			get_tree().paused = false
+			EngineDebugger.send_message("powertool:resumed", [])
+			return true
 		"ping":
 			EngineDebugger.send_message("powertool:pong", [])
 			return true
@@ -24,8 +32,10 @@ func _on_editor_message(message: String, data: Array) -> bool:
 
 
 func _take_screenshot() -> void:
-	# Wait one frame for the viewport to have a current render
-	await get_tree().process_frame
+	# Wait one frame for the viewport to have a current render.
+	# Skip if tree is paused (process_frame won't fire while paused).
+	if not get_tree().paused:
+		await get_tree().process_frame
 
 	var viewport := get_viewport()
 	if not viewport:

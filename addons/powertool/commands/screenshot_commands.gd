@@ -4,7 +4,7 @@ extends "res://addons/powertool/commands/base_command.gd"
 ## Reference to the debugger plugin, set by command_handler
 var _debugger = null
 
-const SCREENSHOT_TIMEOUT := 5.0
+const SCREENSHOT_TIMEOUT := 10.0
 
 
 func set_debugger_ref(debugger) -> void:
@@ -15,6 +15,12 @@ func process_command(peer_id: int, command_type: String, params: Dictionary, com
 	match command_type:
 		"take_screenshot":
 			_take_screenshot(peer_id, params, command_id)
+			return true
+		"pause_for_screenshot":
+			_pause_game(peer_id, command_id)
+			return true
+		"resume_after_screenshot":
+			_resume_game(peer_id, command_id)
 			return true
 	return false
 
@@ -121,3 +127,31 @@ func _wait_for_game_response(expected_messages: Array) -> Variant:
 		_debugger.game_response.disconnect(callback)
 
 	return state[0]
+
+
+func _pause_game(peer_id: int, command_id: String) -> void:
+	if not _debugger or not _debugger.is_game_running():
+		return _send_error(peer_id, "No game is currently running", command_id, "NO_SCENE")
+
+	if not _debugger.send_to_game("powertool:pause"):
+		return _send_error(peer_id, "Failed to send pause request to game", command_id)
+
+	var result = await _wait_for_game_response(["powertool:paused"])
+	if result == null:
+		return _send_error(peer_id, "Pause request timed out", command_id)
+
+	_send_success(peer_id, {"paused": true}, command_id)
+
+
+func _resume_game(peer_id: int, command_id: String) -> void:
+	if not _debugger or not _debugger.is_game_running():
+		return _send_error(peer_id, "No game is currently running", command_id, "NO_SCENE")
+
+	if not _debugger.send_to_game("powertool:resume"):
+		return _send_error(peer_id, "Failed to send resume request to game", command_id)
+
+	var result = await _wait_for_game_response(["powertool:resumed"])
+	if result == null:
+		return _send_error(peer_id, "Resume request timed out", command_id)
+
+	_send_success(peer_id, {"paused": false}, command_id)

@@ -30,3 +30,19 @@ extends CharacterBody3D                          # Matches node type
 func _ready() -> void:
     hitbox.body_entered.connect(_on_hitbox_body_entered)  # Signal connected here, not in scene
 ```
+
+## Validation
+
+After generating scenes and/or scripts, validate with a headless Godot run:
+
+```bash
+timeout 30 godot --headless --path <project_dir> --quit
+```
+
+This catches:
+- GDScript parse errors
+- Missing resource references
+- Circular dependency issues
+- Scene loading failures
+
+Exit code 0 = all scenes and scripts loaded successfully. Non-zero or timeout = errors in stderr.

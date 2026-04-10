@@ -78,3 +78,5 @@ var val = my_dict["key"]         # OK (untyped)
 - `StandardMaterial3D` with `no_depth_test = true` + `TRANSPARENCY_ALPHA` → invisible. Use opaque + unshaded for overlays.
 - Z-fighting between layered surfaces (road on terrain): offset 0.15-0.30m vertically + `render_priority = 1`.
 - `cull_mode = CULL_DISABLED` as safety net on all procedural meshes until winding is confirmed correct.
+
+- **Heavy `_process()` starves debugger channel** — when `_process()` or `_physics_process()` takes most of the frame budget, the PowerTool debugger channel (screenshots, scene tree queries) gets starved. Symptoms: screenshot timeouts, delayed responses. Workarounds: (1) use `take_screenshot` with `pause_first: true`, (2) use editor viewport screenshot (`source: "editor"`), (3) reduce `_process()` workload during testing.

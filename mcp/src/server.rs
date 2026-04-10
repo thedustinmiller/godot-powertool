@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio::io::AsyncBufReadExt;
 
 use anyhow::Result;
 use rmcp::{
@@ -18,7 +19,7 @@ use tokio::sync::Mutex;
 
 use powertool_common::{
     godot as godot_cli,
-    platform::find_godot_binary,
+    platform::{find_godot_binary, godot_user_data_dir},
     project,
 };
 
@@ -39,11 +40,11 @@ fn find_project_root() -> Option<PathBuf> {
 /// Bundled GDScript operations file
 const GODOT_OPERATIONS_GD: &str = include_str!("../../scripts/godot_operations.gd");
 
-/// Active Godot process state
+/// Active Godot process state with live output capture.
 struct GodotProcess {
-    child: Child,
-    output: Vec<String>,
-    errors: Vec<String>,
+    child: tokio::process::Child,
+    output: Arc<Mutex<Vec<String>>>,
+    errors: Arc<Mutex<Vec<String>>>,
 }
 
 const DEFAULT_EDITOR_PORT: u16 = 6550;
@@ -317,6 +318,8 @@ struct GetGodotVersionParams {
 struct TakeScreenshotParams {
     /// File path to save screenshot to (optional, returns base64 if not set)
     file_path: Option<String>,
+    /// Pause the game tree before capturing and resume after. Fixes timeouts on CPU-heavy scenes where _process() starves the debugger channel.
+    pause_first: Option<bool>,
     /// Timeout in seconds for the operation (default: 15)
     timeout_seconds: Option<u64>,
 }
@@ -420,6 +423,14 @@ struct ExecuteEditorScriptParams {
     timeout_seconds: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetEditorLogParams {
+    /// Path to the Godot project directory
+    project_path: String,
+    /// Number of lines from the end to return (default: 50)
+    tail_lines: Option<usize>,
+}
+
 // === Tool implementations ===
 
 #[rmcp::tool_router]
@@ -437,7 +448,7 @@ impl GodotMcpServer {
         Ok(CallToolResult::success(vec![Content::text(version)]))
     }
 
-    /// Launch the Godot editor for a project
+    /// Launch the Godot editor for a project. Polls for WebSocket connection after spawning.
     #[rmcp::tool]
     async fn launch_editor(
         &self,
@@ -450,13 +461,26 @@ impl GodotMcpServer {
             let mut editor = self.editor_process.lock().await;
             *editor = Some(child);
         }
+
+        // Poll for WebSocket connection — editor takes seconds to start its WS server
+        let mut connected = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            self.editor.try_connect().await;
+            if self.editor.is_connected() {
+                connected = true;
+                break;
+            }
+        }
+
+        let status = if connected { "connected" } else { "launched (not yet connected)" };
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Launched Godot editor for {}",
+            "Launched Godot editor for {} — {status}",
             params.project_path
         ))]))
     }
 
-    /// Stop the Godot editor
+    /// Stop the Godot editor. Falls back to process search if the editor wasn't launched by this MCP instance.
     #[rmcp::tool]
     async fn stop_editor(&self) -> Result<CallToolResult, ErrorData> {
         let mut editor = self.editor_process.lock().await;
@@ -467,9 +491,24 @@ impl GodotMcpServer {
                     "Editor stopped",
                 )]))
             }
-            None => Ok(CallToolResult::success(vec![Content::text(
-                "No editor was running",
-            )])),
+            None => {
+                // Fallback: find and kill Godot editor processes by binary path
+                let godot_path = self.godot_path.to_string_lossy();
+                let pattern = format!("{} -e", godot_path);
+                let result = std::process::Command::new("pkill")
+                    .args(["-f", &pattern])
+                    .output();
+                match result {
+                    Ok(output) if output.status.success() => {
+                        Ok(CallToolResult::success(vec![Content::text(
+                            "Editor stopped (found via process search)",
+                        )]))
+                    }
+                    _ => Ok(CallToolResult::success(vec![Content::text(
+                        "No editor process found",
+                    )])),
+                }
+            }
         }
     }
 
@@ -485,31 +524,52 @@ impl GodotMcpServer {
         {
             let mut active = self.active_process.lock().await;
             if let Some(mut proc) = active.take() {
-                let _ = proc.child.kill();
+                let _ = proc.child.kill().await;
             }
         }
 
         let project_str = project.to_string_lossy().to_string();
-        let mut args = vec!["-d", "--path", project_str.as_str()];
-        let scene_str;
+        let mut args = vec!["-d".to_string(), "--path".to_string(), project_str];
         if let Some(ref scene) = params.scene {
-            scene_str = scene.clone();
-            args.push(&scene_str);
+            args.push(scene.clone());
         }
 
-        let child = std::process::Command::new(&self.godot_path)
+        let mut child = tokio::process::Command::new(&self.godot_path)
             .args(&args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let output_buf = Arc::new(Mutex::new(Vec::new()));
+        let errors_buf = Arc::new(Mutex::new(Vec::new()));
+
+        // Spawn background tasks to capture stdout/stderr lines
+        if let Some(stdout) = child.stdout.take() {
+            let buf = output_buf.clone();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    buf.lock().await.push(line);
+                }
+            });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let buf = errors_buf.clone();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    buf.lock().await.push(line);
+                }
+            });
+        }
 
         {
             let mut active = self.active_process.lock().await;
             *active = Some(GodotProcess {
                 child,
-                output: Vec::new(),
-                errors: Vec::new(),
+                output: output_buf,
+                errors: errors_buf,
             });
         }
 
@@ -520,18 +580,20 @@ impl GodotMcpServer {
         ))]))
     }
 
-    /// Get debug output from the running Godot project
+    /// Get debug output from the running Godot project (stdout and stderr captured live)
     #[rmcp::tool]
     async fn get_debug_output(&self) -> Result<CallToolResult, ErrorData> {
         let active = self.active_process.lock().await;
         match &*active {
             Some(proc) => {
-                let output = serde_json::json!({
-                    "output": proc.output,
-                    "errors": proc.errors,
+                let output = proc.output.lock().await.clone();
+                let errors = proc.errors.lock().await.clone();
+                let result = serde_json::json!({
+                    "output": output,
+                    "errors": errors,
                 });
                 Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&output).unwrap_or_default(),
+                    serde_json::to_string_pretty(&result).unwrap_or_default(),
                 )]))
             }
             None => Err(ErrorData::invalid_params(
@@ -541,17 +603,49 @@ impl GodotMcpServer {
         }
     }
 
+    /// Read the Godot editor log file for a project. Useful for debugging errors that don't appear in get_debug_output (e.g., editor-mode crashes, scene loading failures).
+    #[rmcp::tool]
+    async fn get_editor_log(
+        &self,
+        Parameters(params): Parameters<GetEditorLogParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let project = Self::validate_project_path(&params.project_path)?;
+        let project_godot = project.join("project.godot");
+        let project_name = project::parse_project_name(&project_godot)
+            .map_err(|e| ErrorData::internal_error(format!("Failed to read project name: {e}"), None))?;
+
+        let log_path = godot_user_data_dir(&project_name).join("logs").join("godot.log");
+        if !log_path.exists() {
+            return Err(ErrorData::invalid_params(
+                format!("Log file not found: {}", log_path.display()),
+                None,
+            ));
+        }
+
+        let content = fs::read_to_string(&log_path)
+            .map_err(|e| ErrorData::internal_error(format!("Failed to read log: {e}"), None))?;
+
+        let tail = params.tail_lines.unwrap_or(50);
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(tail);
+        let result = lines[start..].join("\n");
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     /// Stop the standalone Godot scene process. Only needed if the scene was launched with run_scene_standalone.
     #[rmcp::tool]
     async fn stop_scene_standalone(&self) -> Result<CallToolResult, ErrorData> {
         let mut active = self.active_process.lock().await;
         match active.take() {
             Some(mut proc) => {
-                let _ = proc.child.kill();
+                let _ = proc.child.kill().await;
+                let output = proc.output.lock().await.clone();
+                let errors = proc.errors.lock().await.clone();
                 let final_output = serde_json::json!({
                     "message": "Scene stopped",
-                    "final_output": proc.output,
-                    "final_errors": proc.errors,
+                    "final_output": output,
+                    "final_errors": errors,
                 });
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&final_output).unwrap_or_default(),
@@ -1070,7 +1164,7 @@ impl GodotMcpServer {
         )]))
     }
 
-    /// Take a screenshot of the running game viewport or editor viewport. Requires the editor to be running with the PowerTool addon.
+    /// Take a screenshot of the running game viewport or editor viewport. Requires the editor to be running with the PowerTool addon. Use pause_first=true for CPU-heavy scenes where the debugger channel may be starved.
     #[rmcp::tool]
     async fn take_screenshot(
         &self,
@@ -1078,9 +1172,22 @@ impl GodotMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
+
+        // Pause game tree before capture if requested
+        if params.pause_first.unwrap_or(false) {
+            let _ = self.run_via_editor("pause_for_screenshot", serde_json::json!({}), timeout).await;
+        }
+
         let result = self
             .run_via_editor("take_screenshot", serde_json::json!({}), timeout)
-            .await?;
+            .await;
+
+        // Resume game tree after capture
+        if params.pause_first.unwrap_or(false) {
+            let _ = self.run_via_editor("resume_after_screenshot", serde_json::json!({}), timeout).await;
+        }
+
+        let result = result?;
 
         // Editor returns base64 PNG in result.image_base64
         if let Some(b64) = result.get("image_base64").and_then(|v| v.as_str()) {
