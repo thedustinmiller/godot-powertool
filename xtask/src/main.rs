@@ -576,14 +576,13 @@ fn download_zip(url: &str) -> Result<Vec<u8>> {
     pb.set_message(format!("Downloading {url}..."));
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let response = reqwest::blocking::get(url)
+    let response = ureq::get(url)
+        .call()
         .with_context(|| format!("Failed to download {url}"))?;
-
-    if !response.status().is_success() {
-        bail!("Failed to download {url}: HTTP {}", response.status().as_u16());
-    }
-
-    let bytes = response.bytes()?.to_vec();
+    let bytes = response
+        .into_body()
+        .read_to_vec()
+        .with_context(|| format!("Failed to read response from {url}"))?;
     pb.finish_with_message("Download complete");
     Ok(bytes)
 }

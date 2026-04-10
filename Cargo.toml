@@ -53,7 +53,7 @@ regex = "1"
 walkdir = "2"
 
 # Networking / downloads
-reqwest = { version = "0.12", features = ["blocking"] }
+ureq = "3"
 
 # Archive handling
 zip = "2.2"
