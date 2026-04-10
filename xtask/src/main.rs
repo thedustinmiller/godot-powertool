@@ -581,6 +581,8 @@ fn download_zip(url: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("Failed to download {url}"))?;
     let bytes = response
         .into_body()
+        .with_config()
+        .limit(512 * 1024 * 1024) // 512 MiB — Godot downloads are ~60-100 MiB
         .read_to_vec()
         .with_context(|| format!("Failed to read response from {url}"))?;
     pb.finish_with_message("Download complete");
