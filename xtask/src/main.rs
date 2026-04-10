@@ -178,6 +178,10 @@ enum Commands {
     /// Launch or configure the MCP server
     #[command(subcommand)]
     Mcp(McpCommands),
+
+    /// Launch or configure the GDScript LSP bridge
+    #[command(subcommand)]
+    LspBridge(LspBridgeCommands),
 }
 
 #[derive(Subcommand)]
@@ -269,6 +273,19 @@ enum McpCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum LspBridgeCommands {
+    /// Run the GDScript LSP bridge on stdio
+    Run,
+
+    /// Print LSP bridge configuration for various clients
+    Install {
+        /// Client to generate config for: claude
+        #[arg(default_value = "claude")]
+        client: String,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -350,6 +367,10 @@ fn main() -> Result<()> {
         Commands::Mcp(cmd) => match cmd {
             McpCommands::Run => cmd_mcp_run(),
             McpCommands::Install { client } => cmd_mcp_install(&client),
+        },
+        Commands::LspBridge(cmd) => match cmd {
+            LspBridgeCommands::Run => cmd_lsp_bridge_run(),
+            LspBridgeCommands::Install { client } => cmd_lsp_bridge_install(&client),
         },
     }
 }
@@ -666,6 +687,22 @@ fn cmd_init(
         eprintln!("  cargo build -p powertool-mcp --release");
     }
 
+    // --- 8. Build LSP bridge ---
+    println!("\n=== Building LSP bridge ===\n");
+    let status = Command::new("cargo")
+        .args(["build", "-p", "powertool-lsp-bridge", "--release"])
+        .current_dir(&root)
+        .status()
+        .context("Failed to build LSP bridge")?;
+
+    if status.success() {
+        let lsp_bin = root.join("target").join("release").join("powertool-lsp-bridge");
+        println!("LSP bridge built: {}", lsp_bin.display());
+    } else {
+        eprintln!("Warning: LSP bridge build failed. You can retry with:");
+        eprintln!("  cargo build -p powertool-lsp-bridge --release");
+    }
+
     // --- Done ---
     println!("\n=== Init complete! ===\n");
     println!("  cargo xtask editor         # Open Godot editor");
@@ -677,6 +714,7 @@ fn cmd_init(
         "  claude mcp add godot -- {}  # Add MCP server to Claude Code",
         mcp_bin.display()
     );
+    println!("  cargo xtask lsp-bridge install  # Configure GDScript LSP");
 
     Ok(())
 }
@@ -770,6 +808,24 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         println!("\nSkipping MCP server build (--skip-mcp)");
     }
 
+    // --- 7. Build LSP bridge ---
+    if !opts.skip_mcp {
+        println!("\n=== Building LSP bridge ===\n");
+        let status = Command::new("cargo")
+            .args(["build", "-p", "powertool-lsp-bridge", "--release"])
+            .current_dir(&root)
+            .status()
+            .context("Failed to build LSP bridge")?;
+
+        if status.success() {
+            let lsp_bin = root.join("target").join("release").join("powertool-lsp-bridge");
+            println!("LSP bridge built: {}", lsp_bin.display());
+        } else {
+            eprintln!("Warning: LSP bridge build failed. You can retry with:");
+            eprintln!("  cargo build -p powertool-lsp-bridge --release");
+        }
+    }
+
     // --- Done ---
     println!("\n=== Setup complete! ===\n");
     println!("  cargo xtask editor         # Open Godot editor");
@@ -782,6 +838,7 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
             "  claude mcp add godot -- {}  # Add MCP server to Claude Code",
             mcp_bin.display()
         );
+        println!("  cargo xtask lsp-bridge install  # Configure GDScript LSP");
     }
 
     Ok(())
@@ -2050,6 +2107,74 @@ fn cmd_mcp_install(client: &str) -> Result<()> {
             println!("  Command: {mcp_path}");
             println!("  Transport: stdio");
             println!("  Build first: cargo build -p powertool-mcp --release");
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// LSP Bridge Commands
+// =============================================================================
+
+fn cmd_lsp_bridge_run() -> Result<()> {
+    let root = project_root()?;
+    let bin = root.join("target").join("release").join("powertool-lsp-bridge");
+
+    if !bin.exists() {
+        println!("LSP bridge not built. Building in release mode...");
+        let status = Command::new("cargo")
+            .args(["build", "-p", "powertool-lsp-bridge", "--release"])
+            .current_dir(&root)
+            .status()
+            .context("Failed to build LSP bridge")?;
+        if !status.success() {
+            bail!("Failed to build LSP bridge");
+        }
+    }
+
+    let status = Command::new(&bin)
+        .status()
+        .context("Failed to run LSP bridge")?;
+
+    if !status.success() {
+        bail!("LSP bridge exited with error");
+    }
+    Ok(())
+}
+
+fn cmd_lsp_bridge_install(client: &str) -> Result<()> {
+    let root = project_root()?;
+    let bin = root.join("target").join("release").join("powertool-lsp-bridge");
+    let bin_path = bin.to_string_lossy();
+
+    match client {
+        "claude" => {
+            println!("Add GDScript LSP to your project's .claude/settings.json:\n");
+            println!(r#"{{
+  "lspServers": {{
+    "gdscript": {{
+      "command": "{bin_path}",
+      "args": [],
+      "extensionToLanguage": {{
+        ".gd": "gdscript"
+      }},
+      "restartOnCrash": true,
+      "maxRestarts": 3
+    }}
+  }}
+}}"#);
+            println!();
+            println!("Build first if needed: cargo build -p powertool-lsp-bridge --release");
+            println!("Requires Godot editor running with LSP enabled (port 6005).");
+        }
+        _ => {
+            println!("GDScript LSP bridge configuration:");
+            println!("  Command: {bin_path}");
+            println!("  Transport: stdio");
+            println!("  Language: gdscript");
+            println!("  Build first: cargo build -p powertool-lsp-bridge --release");
+            println!("  Requires Godot editor running with LSP enabled (port 6005).");
         }
     }
 

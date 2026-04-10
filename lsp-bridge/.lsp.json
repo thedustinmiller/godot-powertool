@@ -1,0 +1,8 @@
+{
+  "gdscript": {
+    "command": "powertool-lsp-bridge",
+    "extensionToLanguage": {
+      ".gd": "gdscript"
+    }
+  }
+}

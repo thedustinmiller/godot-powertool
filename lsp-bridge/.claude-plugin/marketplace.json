@@ -1,0 +1,17 @@
+{
+  "name": "godot-powertool-lsp",
+  "owner": {
+    "name": "godot-powertool"
+  },
+  "metadata": {
+    "description": "GDScript LSP bridge for Godot Engine"
+  },
+  "plugins": [
+    {
+      "name": "gdscript-lsp",
+      "source": "./",
+      "description": "GDScript language server bridge — proxies Godot's built-in LSP to Claude Code via stdio",
+      "version": "0.1.0"
+    }
+  ]
+}

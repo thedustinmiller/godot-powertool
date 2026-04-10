@@ -1,7 +1,7 @@
 [workspace]
 # To enable the Rust GDExtension, uncomment the line below and comment out the current one.
 # See "Enabling the Rust GDExtension" in README.md for full instructions.
-members = ["common", "xtask", "mcp", "docs"]
+members = ["common", "xtask", "mcp", "docs", "lsp-bridge"]
 # members = ["common", "extension", "xtask", "mcp", "docs"]
 resolver = "2"
 

@@ -1,0 +1,9 @@
+{
+  "name": "gdscript-lsp",
+  "version": "0.1.0",
+  "description": "GDScript language server bridge — proxies Godot's built-in LSP to Claude Code via stdio",
+  "author": {
+    "name": "godot-powertool"
+  },
+  "lspServers": "./.lsp.json"
+}
