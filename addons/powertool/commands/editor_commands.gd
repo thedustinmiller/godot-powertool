@@ -49,6 +49,7 @@ func _get_editor_state(peer_id: int, _params: Dictionary, command_id: String) ->
 		"root_type": root_type,
 		"selected_nodes": selected_nodes,
 		"is_playing": ei.is_playing_scene(),
+		"project_path": ProjectSettings.globalize_path("res://"),
 	}, command_id)
 
 

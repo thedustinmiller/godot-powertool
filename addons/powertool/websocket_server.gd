@@ -124,6 +124,10 @@ func _handle_text_message(peer_id: int, text: String) -> void:
 func _create_peer() -> WebSocketPeer:
 	var ws := WebSocketPeer.new()
 	ws.supported_protocols = supported_protocols
+	# Defaults are ~64 KiB, which overflows on screenshot payloads.
+	ws.outbound_buffer_size = 16 * 1024 * 1024
+	ws.inbound_buffer_size = 16 * 1024 * 1024
+	ws.max_queued_packets = 64
 	return ws
 
 

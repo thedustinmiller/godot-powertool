@@ -81,6 +81,79 @@ pub fn get_project_info(project_dir: &Path) -> Result<ProjectInfo> {
     })
 }
 
+/// Parse a `project.godot` and return the `[autoload]` script paths.
+/// Values look like `*res://script.gd` (the `*` marks "enabled" — strip it).
+pub fn parse_autoload_scripts(project_godot: &Path) -> Result<Vec<String>> {
+    let content = fs::read_to_string(project_godot)
+        .with_context(|| format!("Failed to read {}", project_godot.display()))?;
+
+    let mut in_autoload = false;
+    let mut paths = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_autoload = trimmed == "[autoload]";
+            continue;
+        }
+        if !in_autoload || trimmed.is_empty() || trimmed.starts_with(';') {
+            continue;
+        }
+        if let Some(eq) = trimmed.find('=') {
+            let value = trimmed[eq + 1..].trim().trim_matches('"');
+            let value = value.strip_prefix('*').unwrap_or(value);
+            if value.starts_with("res://") && value.ends_with(".gd") {
+                paths.push(value.to_string());
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// Parse the project's main scene path from `project.godot` (`run/main_scene`).
+pub fn parse_main_scene(project_godot: &Path) -> Result<Option<String>> {
+    let content = fs::read_to_string(project_godot)
+        .with_context(|| format!("Failed to read {}", project_godot.display()))?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("run/main_scene=") {
+            let value = rest.trim().trim_matches('"');
+            if !value.is_empty() {
+                return Ok(Some(value.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Parse a `.tscn` and return the `path` of every `[ext_resource type="Script" ...]` line.
+/// Returns res:// paths.
+pub fn parse_scene_scripts(scene_file: &Path) -> Result<Vec<String>> {
+    let content = fs::read_to_string(scene_file)
+        .with_context(|| format!("Failed to read {}", scene_file.display()))?;
+    let mut paths = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("[ext_resource") {
+            continue;
+        }
+        if !trimmed.contains("type=\"Script\"") {
+            continue;
+        }
+        if let Some(start) = trimmed.find("path=\"") {
+            let rest = &trimmed[start + 6..];
+            if let Some(end) = rest.find('"') {
+                paths.push(rest[..end].to_string());
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// Resolve a `res://` path against the project root to an absolute filesystem path.
+pub fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
+    let stripped = res_path.strip_prefix("res://").unwrap_or(res_path);
+    project_dir.join(stripped)
+}
+
 /// Find Godot projects in a directory, optionally recursing.
 pub fn find_projects(dir: &Path, recursive: bool) -> Vec<ProjectInfo> {
     let mut projects = Vec::new();

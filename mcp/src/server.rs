@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Child, Stdio},
+    process::Stdio,
     sync::Arc,
     time::Duration,
 };
@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use powertool_common::{
     godot as godot_cli,
+    lsp::validate as lsp_validate,
     platform::{find_godot_binary, godot_user_data_dir},
     project,
 };
@@ -47,12 +48,48 @@ struct GodotProcess {
     errors: Arc<Mutex<Vec<String>>>,
 }
 
+impl GodotProcess {
+    /// Spawn Godot with stdout/stderr piped into shared buffers that can be read live.
+    fn spawn(godot_path: &Path, args: &[String]) -> Result<Self, std::io::Error> {
+        let mut child = tokio::process::Command::new(godot_path)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let errors = Arc::new(Mutex::new(Vec::new()));
+
+        if let Some(stdout) = child.stdout.take() {
+            let buf = output.clone();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    buf.lock().await.push(line);
+                }
+            });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let buf = errors.clone();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    buf.lock().await.push(line);
+                }
+            });
+        }
+
+        Ok(GodotProcess { child, output, errors })
+    }
+}
+
 const DEFAULT_EDITOR_PORT: u16 = 6550;
+const DEFAULT_LSP_PORT: u16 = 6005;
 
 pub struct GodotMcpServer {
     godot_path: PathBuf,
     active_process: Arc<Mutex<Option<GodotProcess>>>,
-    editor_process: Arc<Mutex<Option<Child>>>,
+    editor_process: Arc<Mutex<Option<GodotProcess>>>,
     operations_script: PathBuf,
     editor: Arc<EditorConnection>,
     #[allow(dead_code)]
@@ -455,11 +492,16 @@ impl GodotMcpServer {
         Parameters(params): Parameters<ProjectPathParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let project = Self::validate_project_path(&params.project_path)?;
-        let child = godot_cli::spawn_godot(&self.godot_path, &["-e", "--path", &project.to_string_lossy()], &project, Stdio::null(), Stdio::null())
+        let args = vec![
+            "-e".to_string(),
+            "--path".to_string(),
+            project.to_string_lossy().to_string(),
+        ];
+        let proc = GodotProcess::spawn(&self.godot_path, &args)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         {
             let mut editor = self.editor_process.lock().await;
-            *editor = Some(child);
+            *editor = Some(proc);
         }
 
         // Poll for WebSocket connection — editor takes seconds to start its WS server
@@ -485,8 +527,8 @@ impl GodotMcpServer {
     async fn stop_editor(&self) -> Result<CallToolResult, ErrorData> {
         let mut editor = self.editor_process.lock().await;
         match editor.take() {
-            Some(mut child) => {
-                let _ = child.kill();
+            Some(mut proc) => {
+                let _ = proc.child.kill().await;
                 Ok(CallToolResult::success(vec![Content::text(
                     "Editor stopped",
                 )]))
@@ -534,43 +576,12 @@ impl GodotMcpServer {
             args.push(scene.clone());
         }
 
-        let mut child = tokio::process::Command::new(&self.godot_path)
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+        let proc = GodotProcess::spawn(&self.godot_path, &args)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        let output_buf = Arc::new(Mutex::new(Vec::new()));
-        let errors_buf = Arc::new(Mutex::new(Vec::new()));
-
-        // Spawn background tasks to capture stdout/stderr lines
-        if let Some(stdout) = child.stdout.take() {
-            let buf = output_buf.clone();
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    buf.lock().await.push(line);
-                }
-            });
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let buf = errors_buf.clone();
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    buf.lock().await.push(line);
-                }
-            });
-        }
 
         {
             let mut active = self.active_process.lock().await;
-            *active = Some(GodotProcess {
-                child,
-                output: output_buf,
-                errors: errors_buf,
-            });
+            *active = Some(proc);
         }
 
         let scene_info = params.scene.as_deref().unwrap_or("main scene");
@@ -580,27 +591,39 @@ impl GodotMcpServer {
         ))]))
     }
 
-    /// Get debug output from the running Godot project (stdout and stderr captured live)
+    /// Get debug output (stdout/stderr) from Godot processes spawned by this MCP server.
+    /// Combines output from `launch_editor` and `run_scene_standalone` if both are active.
+    /// Note: requires the editor/scene to have been launched via this MCP — externally
+    /// launched editors aren't captured. For those, use `get_editor_log`.
     #[rmcp::tool]
     async fn get_debug_output(&self) -> Result<CallToolResult, ErrorData> {
-        let active = self.active_process.lock().await;
-        match &*active {
-            Some(proc) => {
-                let output = proc.output.lock().await.clone();
-                let errors = proc.errors.lock().await.clone();
-                let result = serde_json::json!({
-                    "output": output,
-                    "errors": errors,
-                });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&result).unwrap_or_default(),
-                )]))
-            }
-            None => Err(ErrorData::invalid_params(
-                "No Godot project is currently running",
-                None,
-            )),
+        let mut sources: Vec<serde_json::Value> = Vec::new();
+
+        if let Some(proc) = &*self.editor_process.lock().await {
+            sources.push(serde_json::json!({
+                "source": "editor",
+                "output": proc.output.lock().await.clone(),
+                "errors": proc.errors.lock().await.clone(),
+            }));
         }
+        if let Some(proc) = &*self.active_process.lock().await {
+            sources.push(serde_json::json!({
+                "source": "standalone",
+                "output": proc.output.lock().await.clone(),
+                "errors": proc.errors.lock().await.clone(),
+            }));
+        }
+
+        if sources.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "No Godot processes captured by this MCP server. Launch via launch_editor or run_scene_standalone, or use get_editor_log to read the editor's log file.",
+                None,
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({ "sources": sources })).unwrap_or_default(),
+        )]))
     }
 
     /// Read the Godot editor log file for a project. Useful for debugging errors that don't appear in get_debug_output (e.g., editor-mode crashes, scene loading failures).
@@ -1131,6 +1154,7 @@ impl GodotMcpServer {
     }
 
     /// Run a scene via the Godot editor. Requires the editor to be running with the PowerTool addon. If no scene path is given, runs the project's main scene.
+    /// Pre-validates GDScript syntax via the editor's LSP (port 6005 by default; override with POWERTOOL_LSP_PORT). Falls back to `--check-only` per script if the LSP is unreachable. Set POWERTOOL_SKIP_VALIDATION=1 to skip.
     #[rmcp::tool]
     async fn run_scene(
         &self,
@@ -1138,6 +1162,11 @@ impl GodotMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.require_editor().await?;
         let timeout = Self::timeout_from(params.timeout_seconds);
+
+        if std::env::var("POWERTOOL_SKIP_VALIDATION").ok().as_deref() != Some("1") {
+            self.validate_scene_scripts(params.scene.as_deref(), timeout).await?;
+        }
+
         let mut p = serde_json::json!({});
         if let Some(ref scene) = params.scene {
             p["scene"] = serde_json::json!(scene);
@@ -1146,6 +1175,136 @@ impl GodotMcpServer {
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
+    }
+
+    /// Discover scripts referenced by a scene + project autoloads, validate them
+    /// via Godot's LSP (with `--check-only` fallback), and return an error if any
+    /// script fails to parse.
+    async fn validate_scene_scripts(
+        &self,
+        scene: Option<&str>,
+        timeout: Duration,
+    ) -> Result<(), ErrorData> {
+        // Resolve project root by asking the editor.
+        let state = self
+            .run_via_editor("get_editor_state", serde_json::json!({}), timeout)
+            .await?;
+        let project_root = match state.get("project_path").and_then(|v| v.as_str()) {
+            Some(p) if !p.is_empty() => PathBuf::from(p),
+            _ => return Ok(()), // Editor didn't report a project — skip silently.
+        };
+        let project_godot = project_root.join("project.godot");
+
+        // Find the scene path: explicit param, or main_scene from project.godot.
+        let scene_res = match scene {
+            Some(s) => Some(s.to_string()),
+            None => project::parse_main_scene(&project_godot)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?,
+        };
+
+        // Collect scripts: autoloads + scene's ext_resource Scripts.
+        let mut script_paths: Vec<String> = project::parse_autoload_scripts(&project_godot)
+            .unwrap_or_default();
+        if let Some(ref s) = scene_res {
+            let scene_fs = project::resolve_res_path(&project_root, s);
+            if scene_fs.exists() {
+                if let Ok(scripts) = project::parse_scene_scripts(&scene_fs) {
+                    script_paths.extend(scripts);
+                }
+            }
+        }
+        script_paths.sort();
+        script_paths.dedup();
+        if script_paths.is_empty() {
+            return Ok(());
+        }
+
+        // Build (uri, content) pairs.
+        let mut files: Vec<lsp_validate::ScriptFile> = Vec::new();
+        for res_path in &script_paths {
+            let fs_path = project::resolve_res_path(&project_root, res_path);
+            let Ok(text) = fs::read_to_string(&fs_path) else {
+                continue;
+            };
+            let uri = format!("file://{}", fs_path.display());
+            files.push(lsp_validate::ScriptFile { uri, text });
+        }
+        if files.is_empty() {
+            return Ok(());
+        }
+
+        let lsp_port = std::env::var("POWERTOOL_LSP_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_LSP_PORT);
+
+        // Try LSP first. Fall back to --check-only if it can't be reached or errors.
+        let lsp_result = lsp_validate::validate(
+            "127.0.0.1",
+            lsp_port,
+            files,
+            Duration::from_millis(800),
+        )
+        .await;
+
+        let errors: Vec<serde_json::Value> = match lsp_result {
+            Ok(diags) => lsp_validate::errors_only(&diags)
+                .into_iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "uri": d.uri,
+                        "line": d.line + 1,
+                        "column": d.column + 1,
+                        "message": d.message,
+                        "source": "lsp",
+                    })
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("LSP validation unavailable ({e}); falling back to --check-only");
+                self.fallback_check_only(&project_root, &script_paths).await
+            }
+        };
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ErrorData::invalid_params(
+                "GDScript parse errors prevent running the scene. Fix the listed errors and try again, or set POWERTOOL_SKIP_VALIDATION=1 to bypass.",
+                Some(serde_json::json!({ "errors": errors })),
+            ))
+        }
+    }
+
+    async fn fallback_check_only(
+        &self,
+        project_root: &Path,
+        script_paths: &[String],
+    ) -> Vec<serde_json::Value> {
+        let mut errors = Vec::new();
+        for res_path in script_paths {
+            let output = tokio::process::Command::new(&self.godot_path)
+                .args([
+                    "--headless",
+                    "--path",
+                    &project_root.to_string_lossy(),
+                    "--check-only",
+                    "--script",
+                    res_path,
+                ])
+                .output()
+                .await;
+            let Ok(out) = output else { continue };
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                errors.push(serde_json::json!({
+                    "uri": res_path,
+                    "message": stderr.trim(),
+                    "source": "check-only",
+                }));
+            }
+        }
+        errors
     }
 
     /// Stop the scene currently running in the Godot editor.

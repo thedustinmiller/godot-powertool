@@ -12,7 +12,8 @@ use tokio::{
     sync::{Mutex, mpsc, oneshot},
 };
 
-use crate::{composer, connection, framing};
+use crate::composer;
+use powertool_common::lsp::{connection, framing};
 
 /// Tracks open file URIs so the composer knows which files to fan out over.
 pub type OpenFiles = Arc<Mutex<HashSet<String>>>;

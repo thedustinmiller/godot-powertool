@@ -278,7 +278,7 @@ enum LspBridgeCommands {
     /// Run the GDScript LSP bridge on stdio
     Run,
 
-    /// Print LSP bridge configuration for various clients
+    /// Install LSP bridge configuration for a client
     Install {
         /// Client to generate config for: claude
         #[arg(default_value = "claude")]
@@ -2151,20 +2151,48 @@ fn cmd_lsp_bridge_install(client: &str) -> Result<()> {
 
     match client {
         "claude" => {
-            println!("Add GDScript LSP to your project's .claude/settings.json:\n");
-            println!(r#"{{
-  "lspServers": {{
-    "gdscript": {{
-      "command": "{bin_path}",
-      "args": [],
-      "extensionToLanguage": {{
-        ".gd": "gdscript"
-      }},
-      "restartOnCrash": true,
-      "maxRestarts": 3
-    }}
-  }}
-}}"#);
+            let claude_dir = root.join(".claude");
+            let settings_path = claude_dir.join("settings.json");
+
+            // Read existing settings or start fresh
+            let mut settings: serde_json::Value = if settings_path.exists() {
+                let contents = fs::read_to_string(&settings_path)
+                    .context("Failed to read .claude/settings.json")?;
+                serde_json::from_str(&contents)
+                    .context("Failed to parse .claude/settings.json")?
+            } else {
+                serde_json::json!({})
+            };
+
+            // Build the gdscript LSP entry
+            let gdscript_entry = serde_json::json!({
+                "command": bin_path,
+                "args": [],
+                "extensionToLanguage": {
+                    ".gd": "gdscript"
+                },
+                "restartOnCrash": true,
+                "maxRestarts": 3
+            });
+
+            // Merge into settings.lspServers.gdscript
+            let obj = settings.as_object_mut().context("settings.json is not an object")?;
+            let lsp_servers = obj
+                .entry("lspServers")
+                .or_insert_with(|| serde_json::json!({}));
+            lsp_servers
+                .as_object_mut()
+                .context("lspServers is not an object")?
+                .insert("gdscript".to_string(), gdscript_entry);
+
+            // Ensure .claude/ directory exists and write
+            fs::create_dir_all(&claude_dir).context("Failed to create .claude directory")?;
+            let formatted = serde_json::to_string_pretty(&settings)
+                .context("Failed to serialize settings")?;
+            fs::write(&settings_path, formatted + "\n")
+                .context("Failed to write .claude/settings.json")?;
+
+            println!("Wrote GDScript LSP config to {}", settings_path.display());
             println!();
             println!("Build first if needed: cargo build -p powertool-lsp-bridge --release");
             println!("Requires Godot editor running with LSP enabled (port 6005).");

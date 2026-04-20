@@ -1,7 +1,5 @@
 mod bridge;
 mod composer;
-mod connection;
-mod framing;
 
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt};

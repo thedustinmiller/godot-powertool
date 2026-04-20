@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+powertool-common.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 serde.workspace = true
