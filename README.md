@@ -233,6 +233,24 @@ addons/sample_extension/
     └── src/lib.rs               # `SampleGreeter` and the gdextension entry symbol
 ```
 
+## Threading
+
+Default builds are **multithreaded** end-to-end. Native desktop/mobile use OS threads as usual; web/WASM uses `pthread` + `+atomics` and Godot's threaded runtime, which requires the page to be served with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` (so `SharedArrayBuffer` is available). The Vite dev/preview servers in `web/` already set those headers.
+
+If you need to ship a build for environments that can't satisfy COOP+COEP (some shared hosts, embeds inside other sites), there's a single-threaded fallback. Five knobs control threading; flip all of them together when changing modes:
+
+| Knob | File | Threaded (default) | Single-threaded |
+|------|------|--------------------|-----------------|
+| xtask build flag | `cargo xtask build --web ...` | `--web` (or `--both` for both variants) | `--web --nothreads` |
+| Cargo feature | `addons/sample_extension/rust/Cargo.toml` | default features | `--features nothreads` |
+| RUSTFLAGS | `xtask/src/main.rs` (`WASM_RUSTFLAGS_*`) | `WASM_RUSTFLAGS_BASE + WASM_RUSTFLAGS_THREADS` | `WASM_RUSTFLAGS_BASE` only |
+| Godot export | `godot/export_presets.cfg` | `variant/thread_support=true` | `variant/thread_support=false` |
+| GDExtension manifest | `addons/sample_extension/sample_extension.gdextension` | already lists both `web.*.threads.wasm32` and `web.*.wasm32` — Godot picks based on the export setting | (no change needed) |
+
+The xtask flow handles the first three for you — `--web` runs the threaded build with the right flags, `--web --nothreads` flips to the single-threaded variant, and `--web --both` produces both files so you can toggle the export preset without rebuilding. The export preset and the manifest are part of the Godot project itself, so they're not driven from the CLI; flip them in the editor or by hand. After changing `variant/thread_support`, reload the Godot project before re-exporting.
+
+The runtime knobs `threads/emscripten_pool_size` and `threads/godot_pool_size` in `export_presets.cfg` only matter when threaded — they size the worker pools for emscripten and Godot respectively.
+
 ## License
 
 MIT OR Apache-2.0

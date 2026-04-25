@@ -113,19 +113,26 @@ enum Commands {
         bootstrap_ref: Option<String>,
     },
 
-    /// Build the GDExtension library
+    /// Build the GDExtension library. WASM builds default to the threaded
+    /// variant (matches `variant/thread_support=true` in export_presets.cfg);
+    /// see the "Threading" section of README.md for the full set of knobs.
     Build {
         /// Build in release mode (default: debug)
         #[arg(long, short)]
         release: bool,
 
-        /// Build for web/WASM target (nothreads by default)
+        /// Build for web/WASM target (threaded by default)
         #[arg(long)]
         web: bool,
 
-        /// Also build the threaded WASM variant (implies --web)
+        /// Build only the single-threaded WASM variant (implies --web).
+        /// Use when targeting environments without SharedArrayBuffer / COOP+COEP.
+        #[arg(long, conflicts_with = "both")]
+        nothreads: bool,
+
+        /// Build both WASM variants (threaded + nothreads). Implies --web.
         #[arg(long)]
-        threads: bool,
+        both: bool,
     },
 
     /// Run the Godot project
@@ -384,8 +391,9 @@ fn main() -> Result<()> {
         Commands::Build {
             release,
             web,
-            threads,
-        } => cmd_build(release, web || threads, threads),
+            nothreads,
+            both,
+        } => cmd_build(release, web || nothreads || both, nothreads, both),
         Commands::Run { editor, godot_args } => cmd_run(editor, &godot_args),
         Commands::Test {
             rust_only,
@@ -741,7 +749,7 @@ fn cmd_init(
     // --- 4. Build GDExtension (only if enabled in workspace) ---
     if extension_enabled() {
         println!("\nBuilding GDExtension...");
-        cmd_build(false, false, false)?;
+        cmd_build(false, false, false, false)?;
     }
 
     // --- 4. Initialize Godot project ---
@@ -890,7 +898,7 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     // --- 3. Build GDExtension (only if enabled in workspace) ---
     if extension_enabled() {
         println!("\nBuilding GDExtension...");
-        cmd_build(false, false, false)?;
+        cmd_build(false, false, false, false)?;
     }
 
     // --- 3. Initialize Godot project ---
@@ -1184,7 +1192,7 @@ fn download_godot(version: &str, tools_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_build(release: bool, web: bool, threads: bool) -> Result<()> {
+fn cmd_build(release: bool, web: bool, nothreads: bool, both: bool) -> Result<()> {
     if !extension_enabled() {
         bail!(
             "Rust extension is not enabled.\n\
@@ -1197,8 +1205,11 @@ fn cmd_build(release: bool, web: bool, threads: bool) -> Result<()> {
     let mode = if release { "release" } else { "debug" };
 
     if web {
-        cmd_build_wasm(release, threads)
+        cmd_build_wasm(release, nothreads, both)
     } else {
+        // Native callers (including init/setup which pass false/false/false)
+        // ignore the threading flags — they're WASM-only.
+        let _ = (nothreads, both);
         cmd_build_native(release, mode)
     }
 }
@@ -1250,7 +1261,14 @@ const WASM_RUSTFLAGS_THREADS: &str = concat!(
     "-C target-feature=+atomics",
 );
 
-fn cmd_build_wasm(release: bool, threads: bool) -> Result<()> {
+fn cmd_build_wasm(release: bool, nothreads: bool, both: bool) -> Result<()> {
+    // Selection matrix:
+    //   default        → threaded only  (matches the default export preset)
+    //   --nothreads    → single-threaded only
+    //   --both         → threaded + single-threaded (lets users toggle the
+    //                    export preset without rebuilding)
+    let build_threaded = !nothreads || both;
+    let build_nothreads = nothreads || both;
     let mode = if release { "release" } else { "debug" };
     println!("Building GDExtension for WASM ({mode})...\n");
 
@@ -1385,13 +1403,10 @@ fn cmd_build_wasm(release: bool, threads: bool) -> Result<()> {
         Ok(())
     };
 
-    if threads {
-        println!("--- WASM build 1/2: nothreads ---");
+    if build_threaded && build_nothreads {
+        println!("--- WASM build 1/2: threaded ---");
     }
-    run_wasm_build("", &["--features", "nothreads"], "sample_extension.wasm")?;
-
-    if threads {
-        println!("\n--- WASM build 2/2: threaded ---");
+    if build_threaded {
         run_wasm_build(
             WASM_RUSTFLAGS_THREADS,
             &[],
@@ -1399,20 +1414,31 @@ fn cmd_build_wasm(release: bool, threads: bool) -> Result<()> {
         )?;
     }
 
+    if build_threaded && build_nothreads {
+        println!("\n--- WASM build 2/2: nothreads ---");
+    }
+    if build_nothreads {
+        run_wasm_build("", &["--features", "nothreads"], "sample_extension.wasm")?;
+    }
+
     println!("\nWASM build complete!");
-    println!(
-        "  Nothreads: {}",
-        web_bin_dir.join("sample_extension.wasm").display()
-    );
-    if threads {
+    if build_threaded {
         println!(
             "  Threaded:  {}",
             web_bin_dir.join("sample_extension.threads.wasm").display()
         );
     }
+    if build_nothreads {
+        println!(
+            "  Nothreads: {}",
+            web_bin_dir.join("sample_extension.wasm").display()
+        );
+    }
     println!(
-        "\nNote: export_presets.cfg thread_support must match the variant you use.\n\
-         After changing thread_support, reload the Godot project before re-exporting."
+        "\nNote: export_presets.cfg `variant/thread_support` must match the variant\n\
+         the deployed page can run. See README.md \"Threading\" for the full set\n\
+         of knobs. After changing thread_support, reload the Godot project before\n\
+         re-exporting."
     );
     Ok(())
 }
@@ -1422,7 +1448,7 @@ fn cmd_run(editor: bool, godot_args: &[String]) -> Result<()> {
         let lib_path = extension_bin_dir()?.join(extension_lib_name());
         if !lib_path.exists() {
             println!("GDExtension not found, building...");
-            cmd_build(false, false, false)?;
+            cmd_build(false, false, false, false)?;
         }
     }
 
@@ -1484,7 +1510,7 @@ fn cmd_test(rust_only: bool, godot_only: bool, verbose: bool, filter: Option<&st
             let lib_path = extension_bin_dir()?.join(extension_lib_name());
             if !lib_path.exists() {
                 println!("GDExtension not found, building...");
-                cmd_build(false, false, false)?;
+                cmd_build(false, false, false, false)?;
             }
         }
 
@@ -1786,7 +1812,7 @@ fn cmd_editor() -> Result<()> {
 
 fn cmd_dev(release: bool) -> Result<()> {
     println!("Building and running...\n");
-    cmd_build(release, false, false)?;
+    cmd_build(release, false, false, false)?;
     println!();
     cmd_run(false, &[])
 }
@@ -1941,10 +1967,10 @@ fn cmd_web_export(release: bool) -> Result<()> {
     fs::create_dir_all(&export_dir)?;
 
     println!("Step 1: Building native GDExtension (for export process)...");
-    cmd_build(release, false, false)?;
+    cmd_build(release, false, false, false)?;
 
     println!("\nStep 2: Building WASM GDExtension...");
-    match cmd_build(release, true, false) {
+    match cmd_build(release, true, false, false) {
         Ok(()) => println!("WASM extension built successfully!"),
         Err(e) => {
             println!("Warning: WASM build failed: {e}");

@@ -8,10 +8,13 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Single-threaded WASM build (no -pthread / +atomics).
-# Godot's "Thread Support OFF" web export loads sample_extension.wasm.
-# Build with: cargo +nightly build --features nothreads -Zbuild-std \
-#             --target wasm32-unknown-emscripten
+# Threading for WASM is configured across several layers — see the
+# "Threading" section of the project README for the full picture. In short:
+#   • Default WASM build is THREADED (uses -pthread / +atomics).
+#   • Enabling this feature switches to a single-threaded build, paired with
+#     gdext's experimental-wasm-nothreads. Used for environments without
+#     SharedArrayBuffer / COOP+COEP cross-origin isolation.
+# The xtask `cargo xtask build --web --nothreads` flag activates this.
 nothreads = ["godot/experimental-wasm-nothreads"]
 
 # Native desktop builds: prebuilt API for the godot crate's pinned version.
