@@ -10,8 +10,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use powertool_common::powertool_manifest::{
-    self as manifest, Applied, CURRENT_SCHEMA_VERSION, DRIFT_WATCH_PATHS, MANAGED_PATHS, Manifest,
-    Source,
+    self as manifest, Applied, CURRENT_SCHEMA_VERSION, DRIFT_WATCH_PATHS, MANAGED_PATHS,
+    ManagedPathsConfig, Manifest, Source,
 };
 use walkdir::WalkDir;
 
@@ -58,6 +58,7 @@ pub fn cmd_update(root: &Path, opts: UpdateOptions) -> Result<()> {
                 git_ref: opts.bootstrap_ref.unwrap_or_else(|| "main".to_string()),
             },
             applied: None,
+            managed_paths: ManagedPathsConfig::default(),
         };
         manifest::save(root, &m)?;
         println!("Wrote {}. Run `cargo xtask update` to sync.", path.display());
@@ -91,9 +92,24 @@ pub fn cmd_update(root: &Path, opts: UpdateOptions) -> Result<()> {
 
     println!("Updating from {} @ {}", m.source.url, target_ref);
 
+    // --- Effective managed-path set (after [managed_paths].exclude). --------
+    for excl in &m.managed_paths.exclude {
+        if !MANAGED_PATHS.iter().any(|p| p == excl) {
+            eprintln!(
+                "Warning: [managed_paths].exclude entry {excl:?} is not in MANAGED_PATHS \
+                 — typo, or upstream removed/renamed it."
+            );
+        }
+    }
+    let managed: Vec<&str> = MANAGED_PATHS
+        .iter()
+        .copied()
+        .filter(|p| !m.managed_paths.exclude.iter().any(|e| e == p))
+        .collect();
+
     // --- Dirty-state guard. -------------------------------------------------
     if !opts.force {
-        let dirty = list_dirty_managed_paths(root)?;
+        let dirty = list_dirty_managed_paths(root, &managed)?;
         if !dirty.is_empty() {
             eprintln!("Refusing to update — uncommitted changes in managed paths:");
             for p in &dirty {
@@ -129,11 +145,11 @@ pub fn cmd_update(root: &Path, opts: UpdateOptions) -> Result<()> {
 
     // --- Sync (or simulate) each managed path. ------------------------------
     let mut total = SyncStats::default();
-    for managed in MANAGED_PATHS {
-        let stats = sync_one(&tmp.join(managed), &root.join(managed), opts.check_only)?;
+    for path in &managed {
+        let stats = sync_one(&tmp.join(path), &root.join(path), opts.check_only)?;
         if stats.written > 0 || stats.deleted > 0 {
             println!(
-                "  {managed:30}  +{} -{}",
+                "  {path:30}  +{} -{}",
                 stats.written, stats.deleted
             );
         }
@@ -412,6 +428,7 @@ pub fn write_init_manifest(root: &Path) -> Result<()> {
         schema_version: CURRENT_SCHEMA_VERSION,
         source: Source { url, git_ref },
         applied: None,
+        managed_paths: ManagedPathsConfig::default(),
     };
     manifest::save(root, &m)?;
     println!("Wrote {}", path.display());
@@ -458,9 +475,9 @@ fn git_current_ref(repo: &Path) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-fn list_dirty_managed_paths(root: &Path) -> Result<Vec<String>> {
+fn list_dirty_managed_paths(root: &Path, managed: &[&str]) -> Result<Vec<String>> {
     let mut args = vec!["status", "--porcelain", "--"];
-    args.extend(MANAGED_PATHS.iter().copied());
+    args.extend(managed.iter().copied());
     let out = Command::new("git")
         .args(&args)
         .current_dir(root)

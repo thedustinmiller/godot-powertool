@@ -9,6 +9,8 @@ pub struct TemplateConfig {
     pub godot: String,
     #[serde(default)]
     pub assets: Vec<Asset>,
+    #[serde(default)]
+    pub extension: ExtensionConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -20,8 +22,53 @@ pub struct Asset {
     pub strip_root: bool,
 }
 
+/// GDExtension layout: where the Rust crate lives, where its build artifacts
+/// land in the Godot project, and the basename used for the platform-specific
+/// library filename (`lib{basename}.so`, `{basename}.dll`, `lib{basename}.dylib`).
+///
+/// Defaults preserve the bundled `sample_extension` demo so existing
+/// powertool-derived projects work unchanged without adding the block.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExtensionConfig {
+    #[serde(default = "default_crate_name")]
+    pub crate_name: String,
+    #[serde(default = "default_crate_path")]
+    pub crate_path: String,
+    #[serde(default = "default_deploy_path")]
+    pub deploy_path: String,
+    #[serde(default = "default_lib_basename")]
+    pub lib_basename: String,
+}
+
+impl Default for ExtensionConfig {
+    fn default() -> Self {
+        Self {
+            crate_name: default_crate_name(),
+            crate_path: default_crate_path(),
+            deploy_path: default_deploy_path(),
+            lib_basename: default_lib_basename(),
+        }
+    }
+}
+
 fn default_godot() -> String {
     "4.6.1".to_string()
+}
+
+fn default_crate_name() -> String {
+    "sample_extension".to_string()
+}
+
+fn default_crate_path() -> String {
+    "addons/sample_extension/rust".to_string()
+}
+
+fn default_deploy_path() -> String {
+    "godot/addons/sample_extension".to_string()
+}
+
+fn default_lib_basename() -> String {
+    "sample_extension".to_string()
 }
 
 /// Load `template.toml` from a project root directory.
