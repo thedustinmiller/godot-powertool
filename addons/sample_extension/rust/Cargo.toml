@@ -1,0 +1,32 @@
+[package]
+name = "sample_extension"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Single-threaded WASM build (no -pthread / +atomics).
+# Godot's "Thread Support OFF" web export loads sample_extension.wasm.
+# Build with: cargo +nightly build --features nothreads -Zbuild-std \
+#             --target wasm32-unknown-emscripten
+nothreads = ["godot/experimental-wasm-nothreads"]
+
+# Native desktop builds: prebuilt API for the godot crate's pinned version.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+godot.workspace = true
+
+# WASM builds: api-custom regenerates bindings against the local Godot binary,
+# experimental-wasm enables wasm support, lazy-function-tables works around
+# wasm-ld limits with large extension surfaces.
+[target.'cfg(target_family = "wasm")'.dependencies]
+godot = { version = "0.5.1", features = ["api-custom", "experimental-wasm", "lazy-function-tables"] }
+
+[lints.rust]
+unsafe_code = "allow"  # Required for #[gdextension] FFI
+
+[lints.clippy]
+all = "deny"
+pedantic = "warn"

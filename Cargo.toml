@@ -1,8 +1,19 @@
 [workspace]
-# To enable the Rust GDExtension, uncomment the line below and comment out the current one.
-# See "Enabling the Rust GDExtension" in README.md for full instructions.
-members = ["common", "xtask", "mcp", "docs", "lsp-bridge"]
-# members = ["common", "extension", "xtask", "mcp", "docs"]
+members = [
+    "common",
+    "xtask",
+    "mcp",
+    "godot_docs",
+    "lsp-bridge",
+    # Uncomment to enable the optional Rust GDExtension. After uncommenting,
+    # run `cargo xtask build` and enable "Sample Rust Extension" in
+    # Project Settings → Plugins. See README.md for full instructions.
+     "addons/sample_extension/rust",
+]
+# The xtask copy_addons step duplicates `addons/sample_extension/` into
+# `godot/addons/sample_extension/` for Godot to load. The copy contains a
+# `rust/Cargo.toml` we don't want cargo to treat as a workspace member.
+exclude = ["godot/addons/sample_extension/rust"]
 resolver = "2"
 
 [workspace.package]
@@ -17,7 +28,7 @@ repository = ""
 powertool-common = { path = "common" }
 
 # Godot GDExtension
-godot = { git = "https://github.com/godot-rust/gdext", rev = "7937a0bd02b8d52505a058a1c8494d4466db3059" }
+godot = "0.5.1"
 
 # Error handling
 thiserror = "2.0"
@@ -36,7 +47,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
-clap_complete = "4.5"
+clap_complete = "4.6"
 
 # Async
 tokio = { version = "1", features = ["full"] }

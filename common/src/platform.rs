@@ -142,13 +142,13 @@ pub fn godot_user_data_dir(project_name: &str) -> PathBuf {
 /// Get the platform-specific extension library filename.
 pub fn extension_lib_name() -> &'static str {
     #[cfg(target_os = "linux")]
-    return "libextension.so";
+    return "libsample_extension.so";
     #[cfg(target_os = "windows")]
-    return "extension.dll";
+    return "sample_extension.dll";
     #[cfg(target_os = "macos")]
-    return "libextension.dylib";
+    return "libsample_extension.dylib";
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    return "libextension.so";
+    return "libsample_extension.so";
 }
 
 /// Get the platform subdirectory name for extension binaries.

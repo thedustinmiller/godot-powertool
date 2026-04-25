@@ -1,5 +1,5 @@
 # Template configuration — Godot version and assets used by `cargo xtask`
-godot = "4.6.1"
+godot = "4.6.2"
 
 [[assets]]
 url = "https://github.com/bitwes/Gut/archive/refs/tags/v9.6.0.zip"

@@ -23,11 +23,13 @@ func _update_status() -> void:
 		status_label.add_theme_color_override("font_color", Color.GREEN)
 		version_label.text = "Version: " + GameManager.get_extension_version()
 
-		# Demonstrate using the extension
-		var ext = GameManager.get_extension()
+		# Demonstrate calling into the Rust crate via SampleGreeter.
+		var ext := GameManager.get_extension()
 		if ext:
-			var sum = ext.add(21, 21)
-			result_label.text = "21 + 21 = %d (computed in Rust)" % sum
+			result_label.text = "%s  fib(20) = %d (computed in Rust)" % [
+				ext.greet("Godot"),
+				ext.fibonacci(20),
+			]
 	else:
 		status_label.text = "Ready (no extension)"
 		version_label.text = ""

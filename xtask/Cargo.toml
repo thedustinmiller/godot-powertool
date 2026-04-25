@@ -18,3 +18,4 @@ indicatif.workspace = true
 dirs-next.workspace = true
 toml.workspace = true
 serde_json.workspace = true
+walkdir.workspace = true

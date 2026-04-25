@@ -1,5 +1,5 @@
 [package]
-name = "powertool-docs"
+name = "powertool-godot-docs"
 version.workspace = true
 edition.workspace = true
 publish = false

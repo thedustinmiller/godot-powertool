@@ -1,0 +1,23 @@
+[configuration]
+
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = 4.2
+reloadable = true
+
+[libraries]
+
+linux.debug.x86_64   = "res://addons/sample_extension/bin/linux/libsample_extension.so"
+linux.release.x86_64 = "res://addons/sample_extension/bin/linux/libsample_extension.so"
+
+windows.debug.x86_64   = "res://addons/sample_extension/bin/windows/sample_extension.dll"
+windows.release.x86_64 = "res://addons/sample_extension/bin/windows/sample_extension.dll"
+
+macos.debug         = "res://addons/sample_extension/bin/macos/libsample_extension.dylib"
+macos.release       = "res://addons/sample_extension/bin/macos/libsample_extension.dylib"
+macos.debug.arm64   = "res://addons/sample_extension/bin/macos/libsample_extension.dylib"
+macos.release.arm64 = "res://addons/sample_extension/bin/macos/libsample_extension.dylib"
+
+web.debug.threads.wasm32   = "res://addons/sample_extension/bin/web/sample_extension.threads.wasm"
+web.release.threads.wasm32 = "res://addons/sample_extension/bin/web/sample_extension.threads.wasm"
+web.debug.wasm32           = "res://addons/sample_extension/bin/web/sample_extension.wasm"
+web.release.wasm32         = "res://addons/sample_extension/bin/web/sample_extension.wasm"

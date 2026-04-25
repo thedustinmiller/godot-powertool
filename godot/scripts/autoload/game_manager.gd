@@ -2,10 +2,12 @@ extends Node
 ## GameManager - Central game state manager autoload.
 ##
 ## This singleton manages global game state and provides access to the
-## Rust GDExtension. Access it from anywhere via: GameManager
+## optional Rust GDExtension (sample_extension). Access it from anywhere via:
+## GameManager
 ##
 ## Example:
-##   var version = GameManager.get_extension_version()
+##   if GameManager.has_extension():
+##       print(GameManager.get_extension().greet("World"))
 ##   GameManager.game_started.emit()
 
 # =============================================================================
@@ -41,13 +43,14 @@ func _ready() -> void:
 
 
 func _init_extension() -> void:
-	# Try to instantiate the Rust extension class dynamically
-	if ClassDB.class_exists(&"Example"):
-		_extension = ClassDB.instantiate(&"Example")
+	# Probe for the sample_extension class. Mirrors the defensive pattern in
+	# addons/sample_extension/plugin.gd — extension is fully optional.
+	if ClassDB.class_exists(&"SampleGreeter"):
+		_extension = ClassDB.instantiate(&"SampleGreeter")
 		extension_available = true
-		print("Rust extension loaded. Version: ", _extension.get_version())
+		print("Rust extension loaded: SampleGreeter from sample_extension.")
 	else:
-		push_warning("Rust extension not available. Build it with: cargo xtask build")
+		print("Rust extension (sample_extension) not loaded — running pure GDScript path.")
 		extension_available = false
 
 # =============================================================================
@@ -60,10 +63,11 @@ func get_extension() -> RefCounted:
 	return _extension
 
 
-## Get the extension version string.
+## Get a human-readable label for the loaded extension. Returns "N/A" when
+## the extension is not loaded.
 func get_extension_version() -> String:
 	if _extension:
-		return _extension.get_version()
+		return "sample_extension 0.1.0"
 	return "N/A"
 
 

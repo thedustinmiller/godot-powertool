@@ -31,15 +31,17 @@ This project was originally a template that gave a quick start for using Rust as
 | `xtask` | bin | Convenience scripts for humans (`cargo xtask <command>`)                |
 | `mcp` | bin | MCP server for AI agents (30 tools over stdio + WebSocket)              |
 | `docs` | bin | Godot docs -> markdown generator                                        |
+| `lsp-bridge` | bin | GDScript LSP bridge for editor integrations |
+| `addons/sample_extension/rust` | lib | Optional Rust GDExtension example (disabled by default; see below) |
 
 
 | Directory | Purpose                                               |
 |-----------|-------------------------------------------------------|
 | `godot/` | Godot 4.6 project template (scenes, scripts, tests)   |
-| `extension/` | Optional Rust GDExtension (disabled by default)       |
+| `addons/powertool/` | EditorPlugin addon (WebSocket server, live editor tools) |
+| `addons/sample_extension/` | Optional Rust GDExtension addon (gdextension manifest, plugin, Rust source) |
 | `web/` | Optional Vite frontend + Playwright tests             |
 | `skill/` | Agent knowledge base (GDScript ref, quirks, patterns) |
-| `addons/powertool/` | EditorPlugin addon (WebSocket server, live editor tools) |
 | `scripts/` | GDScript helpers (MCP operations) |
 
 ## Configuration
@@ -48,11 +50,11 @@ All versions are managed in `template.toml`:
 
 ```toml
 [versions]
-godot = "4.6.1"
+godot = "4.6.2"
 gut = "9.6.0"
 mcp = "0.1.0"
 skill = "0.1.0"
-docs = "4.6.1"
+docs = "4.6.2"
 ```
 
 ## CLI Reference
@@ -153,13 +155,13 @@ Generates LLM-friendly Markdown from Godot's XML class documentation, pinned to 
 
 ```bash
 # Generate docs (fetches Godot XML source automatically)
-cargo run -p powertool-docs -- generate
+cargo run -p powertool-godot-docs -- generate
 
 # Generate for a specific version
-cargo run -p powertool-docs -- generate --version 4.5.0
+cargo run -p powertool-godot-docs -- generate --version 4.5.0
 
 # Clean generated files
-cargo run -p powertool-docs -- clean
+cargo run -p powertool-godot-docs -- clean
 ```
 
 Output goes to `doc_api/` — per-class `.md` files plus two indexes:
@@ -173,11 +175,9 @@ These are included automatically when you run `cargo xtask skill install`.
 The `skill/` directory contains a knowledge base for AI coding assistants:
 
 - **SKILL.md** — manifest with progressive loading instructions
-- **gdscript.md** — GDScript language reference
-- **quirks.md** — 18+ documented Godot engine gotchas
-- **scene-generation.md** — patterns for programmatic `.tscn` creation
-- **script-generation.md** — runtime `.gd` script patterns
-- **coordination.md** — ordering scene + script generation
+- **gdscript.md** — GDScript language reference and runtime patterns
+- **quirks.md** — documented Godot/GDScript gotchas
+- **gdextension.md** — native extension loading, parse-time pitfalls, optional addon pattern
 - **doc_api/** — generated API reference (860+ classes)
 
 Install into your project for your agent of choice:
@@ -190,13 +190,48 @@ cargo xtask skill install --target generic   # Plain (skills/)
 
 ## Rust GDExtension (Optional)
 
-Disabled by default. To enable:
+The project ships with a **`addons/sample_extension/`** addon — a complete,
+self-contained Rust GDExtension example built on
+[godot-rust/gdext](https://github.com/godot-rust/gdext) 0.5. It is disabled by
+default. The base `addons/powertool/` addon does not depend on it; deleting the
+`addons/sample_extension/` directory leaves the rest of the project running
+unchanged.
 
-1. In root `Cargo.toml`, change `members` to include `"extension"`
-2. In `godot/project.godot`, enable the extension plugin
-3. Run `cargo xtask build`
+The design follows a "binary-or-slow, never binary-or-bust" pattern: the
+addon's own `plugin.gd` defensively probes `ClassDB.class_exists(...)` before
+using any native class, so a missing or platform-mismatched binary produces a
+warning instead of a crash. See
+`~/Desktop/sho/docs/plans/native-split.md` for the full design rationale.
 
-See the extension directory for example Rust classes exposed to Godot.
+### Enable
+
+1. In root `Cargo.toml`, uncomment `"addons/sample_extension/rust"` in the
+   workspace `members` list.
+2. Run `cargo xtask build` to compile and stage the binary into
+   `godot/addons/sample_extension/bin/<platform>/`.
+3. Open the project in Godot and enable
+   **Project Settings → Plugins → "Sample Rust Extension"**.
+
+From GDScript, the example registers `SampleGreeter` (a `RefCounted`):
+
+```gdscript
+var greeter := SampleGreeter.new()
+print(greeter.greet("World"))   # "Hello, World!"
+print(greeter.fibonacci(40))    # 102334155
+```
+
+### Layout
+
+```
+addons/sample_extension/
+├── plugin.cfg
+├── plugin.gd                    # @tool EditorPlugin, defensive ClassDB probe
+├── sample_extension.gdextension # Library manifest (per-platform paths)
+├── bin/                         # Built binaries (gitignored, populated by xtask build)
+└── rust/
+    ├── Cargo.toml
+    └── src/lib.rs               # `SampleGreeter` and the gdextension entry symbol
+```
 
 ## License
 

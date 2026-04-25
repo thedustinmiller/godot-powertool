@@ -21,11 +21,10 @@ Cargo.lock
 # =============================================================================
 # GDExtension
 # =============================================================================
-# Compiled extension binaries (built from source)
-/godot/addons/extension/bin/linux/
-/godot/addons/extension/bin/windows/
-/godot/addons/extension/bin/macos/
-/godot/addons/extension/bin/web/
+# Compiled extension binaries (built from source) — both at the source addon
+# location and the godot/ copy that xtask deploys to.
+/addons/sample_extension/bin/
+/godot/addons/sample_extension/
 
 # =============================================================================
 # Downloaded Tools
@@ -33,7 +32,7 @@ Cargo.lock
 # Godot binary (downloaded by setup)
 /tools/godot/
 
-# GUT plugin (downloaded by setup)
+# Addon copies deployed by `cargo xtask` from /addons/ into /godot/addons/
 /godot/addons/gut/
 /godot/addons/powertool/
 
@@ -94,7 +93,7 @@ web/.playwright/
 
 # Exported Godot game files (produced by `cargo xtask web export`)
 web/public/godot.*
-web/public/extension.*
+web/public/sample_extension.*
 
 # =============================================================================
 # AI / Claude Code

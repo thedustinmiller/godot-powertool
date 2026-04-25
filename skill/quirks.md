@@ -19,6 +19,7 @@
 - **`EngineDebugger.register_message_capture` strips prefix** — when you register `register_message_capture("myplugin", callback)`, the callback receives the message WITHOUT the prefix. Sending `"myplugin:screenshot"` from the editor → callback gets `message = "screenshot"`, not `"myplugin:screenshot"`. But `EditorDebuggerPlugin._capture()` on the editor side receives the FULL message including prefix.
 - **Lambda capture by value** — GDScript lambdas capture primitive types (`bool`, `int`, `float`, `String`) by value, not reference. Setting `received = true` inside a lambda does NOT update the outer variable. Use an `Array` as a mutable box: `var state := [false]; var fn = func(): state[0] = true`. Arrays and Dictionaries are captured by reference and mutations are shared.
 - **`call_deferred` vs `add_child` timing** — `_ready()` fires when a node enters the tree via `add_child()`, but during `_enter_tree()` of a parent plugin, the child's `_ready()` may be deferred to the next frame. Use `call_deferred()` for setup that depends on child nodes being fully initialized.
+- **Sibling `_ready()` ordering** — `_ready()` fires on children in tree order. If sibling A emits a signal in its `_ready()`, sibling B (which connects in *its* `_ready()`) hasn't subscribed yet and misses the emission. Fix: after connecting, query the emitter's current state and call the handler manually if it already has data.
 
 ## Type Inference Errors
 

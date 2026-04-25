@@ -9,7 +9,7 @@ mod class_list;
 mod converter;
 
 #[derive(Parser)]
-#[command(name = "powertool-docs")]
+#[command(name = "powertool-godot-docs")]
 #[command(about = "Generate Godot API documentation from XML class references")]
 struct Cli {
     #[command(subcommand)]

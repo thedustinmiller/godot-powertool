@@ -13,6 +13,8 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use indicatif::{ProgressBar, ProgressStyle};
+
+mod update;
 use powertool_common::{
     config::load_template_config,
     platform::{
@@ -67,13 +69,49 @@ enum Commands {
         #[arg(long)]
         skip_mcp: bool,
 
+        /// Skip auto-registering the MCP server with Claude Code (`claude mcp add`)
+        #[arg(long)]
+        skip_mcp_add: bool,
+
+        /// Skip building the LSP bridge
+        #[arg(long)]
+        skip_lsp: bool,
+
+        /// Skip auto-installing the LSP bridge config for Claude Code
+        #[arg(long)]
+        skip_lsp_install: bool,
+
         /// Skill install target: claude, codex, generic, or a custom path
         #[arg(long, default_value = "claude")]
         skill_target: String,
     },
 
-    /// Fetch and extract assets from template.toml into the project
-    Update,
+    /// Re-fetch assets declared in template.toml (e.g. the GUT addon zip).
+    Assets,
+
+    /// Sync managed paths from the upstream powertool repo per .powertool.toml.
+    /// On first run in a project that lacks a manifest, use --bootstrap.
+    Update {
+        /// Override the pinned ref for this run; persisted to [source].ref on success.
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+
+        /// Print the rsync delta but don't write or delete anything.
+        #[arg(long)]
+        check: bool,
+
+        /// Bypass the dirty-state guard for managed paths.
+        #[arg(long)]
+        force: bool,
+
+        /// First-time setup — create .powertool.toml from this git URL.
+        #[arg(long, value_name = "GIT_URL")]
+        bootstrap: Option<String>,
+
+        /// Initial ref for --bootstrap (defaults to "main").
+        #[arg(long, requires = "bootstrap", value_name = "REF")]
+        bootstrap_ref: Option<String>,
+    },
 
     /// Build the GDExtension library
     Build {
@@ -304,6 +342,9 @@ fn main() -> Result<()> {
             skip_docs,
             skip_skill,
             skip_mcp,
+            skip_mcp_add,
+            skip_lsp,
+            skip_lsp_install,
             skill_target,
         } => {
             let config = load_template_config(&project_root()?)?;
@@ -314,13 +355,32 @@ fn main() -> Result<()> {
                 skip_docs,
                 skip_skill,
                 skip_mcp,
+                skip_mcp_add,
+                skip_lsp,
+                skip_lsp_install,
                 skill_target,
             })
         },
-        Commands::Update => {
+        Commands::Assets => {
             let config = load_template_config(&project_root()?)?;
             cmd_update(&config.assets)
         },
+        Commands::Update {
+            git_ref,
+            check,
+            force,
+            bootstrap,
+            bootstrap_ref,
+        } => update::cmd_update(
+            &project_root()?,
+            update::UpdateOptions {
+                override_ref: git_ref,
+                check_only: check,
+                force,
+                bootstrap_url: bootstrap,
+                bootstrap_ref,
+            },
+        ),
         Commands::Build {
             release,
             web,
@@ -403,7 +463,7 @@ fn godot_binary() -> Result<PathBuf> {
 fn extension_bin_dir() -> Result<PathBuf> {
     Ok(godot_dir()?
         .join("addons")
-        .join("extension")
+        .join("sample_extension")
         .join("bin")
         .join(extension_platform_dir()))
 }
@@ -421,7 +481,8 @@ fn copy_addons(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Check if "extension" is listed in workspace members in root Cargo.toml.
+/// Check if the sample_extension crate is listed in workspace members in
+/// root Cargo.toml.
 fn extension_enabled() -> bool {
     let Ok(root) = project_root() else {
         return false;
@@ -438,7 +499,7 @@ fn extension_enabled() -> bool {
         .is_some_and(|members| {
             members
                 .iter()
-                .any(|v| v.as_str().is_some_and(|s| s == "extension"))
+                .any(|v| v.as_str().is_some_and(|s| s == "addons/sample_extension/rust"))
         })
 }
 
@@ -452,6 +513,9 @@ struct SetupOptions {
     skip_docs: bool,
     skip_skill: bool,
     skip_mcp: bool,
+    skip_mcp_add: bool,
+    skip_lsp: bool,
+    skip_lsp_install: bool,
     skill_target: String,
 }
 
@@ -590,6 +654,45 @@ fn download_zip(url: &str) -> Result<Vec<u8>> {
 }
 
 // =============================================================================
+// Claude Code integration helpers
+// =============================================================================
+
+/// True if the Claude Code CLI is on PATH.
+fn claude_code_detected() -> bool {
+    which::which("claude").is_ok()
+}
+
+/// Register the MCP server with Claude Code via `claude mcp add`. Idempotent —
+/// any existing `godot` entry is removed first, so re-running setup repoints
+/// the registration at the freshly built binary. Returns Ok(true) on success,
+/// Ok(false) if Claude Code wasn't detected (caller decides how to message),
+/// and Err if `claude mcp add` itself failed.
+fn try_register_mcp_with_claude(mcp_bin: &Path) -> Result<bool> {
+    if !claude_code_detected() {
+        return Ok(false);
+    }
+    let mcp_path = mcp_bin.to_string_lossy();
+
+    // Best-effort cleanup of any prior entry. Silenced — first-run users won't
+    // have one, so the failure here isn't interesting.
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", "godot"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let status = Command::new("claude")
+        .args(["mcp", "add", "godot", "--", &mcp_path])
+        .status()
+        .context("Failed to invoke `claude mcp add`")?;
+
+    if !status.success() {
+        bail!("`claude mcp add godot -- {mcp_path}` exited with {:?}", status.code());
+    }
+    Ok(true)
+}
+
+// =============================================================================
 // Commands
 // =============================================================================
 
@@ -610,6 +713,13 @@ fn cmd_init(
     let root = project_root()?;
     let tools = tools_dir()?;
     fs::create_dir_all(&tools)?;
+
+    // --- 0. Seed .powertool.toml from current git remote so future updates
+    //        know where the project came from. Best-effort — skips quietly
+    //        when this isn't a git repo or origin isn't set.
+    if let Err(e) = update::write_init_manifest(&root) {
+        eprintln!("Warning: could not write .powertool.toml: {e}");
+    }
 
     // --- 1. Godot engine ---
     download_godot(godot_version, &tools)?;
@@ -652,14 +762,14 @@ fn cmd_init(
     // --- 5. Generate API docs ---
     println!("\n=== Generating Godot API docs ===\n");
     let status = Command::new("cargo")
-        .args(["run", "-p", "powertool-docs", "--release", "--", "generate"])
+        .args(["run", "-p", "powertool-godot-docs", "--release", "--", "generate"])
         .current_dir(&root)
         .status()
         .context("Failed to run doc generator")?;
 
     if !status.success() {
         eprintln!("Warning: Doc generation failed. You can retry with:");
-        eprintln!("  cargo run -p powertool-docs -- generate");
+        eprintln!("  cargo run -p powertool-godot-docs -- generate");
     }
 
     // --- 6. Install skill files ---
@@ -680,12 +790,35 @@ fn cmd_init(
         .status()
         .context("Failed to build MCP server")?;
 
-    if status.success() {
+    let mcp_built = status.success();
+    if mcp_built {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
         println!("MCP server built: {}", mcp_bin.display());
     } else {
         eprintln!("Warning: MCP server build failed. You can retry with:");
         eprintln!("  cargo build -p powertool-mcp --release");
+    }
+
+    // --- 7b. Register MCP with Claude Code (auto, if detected) ---
+    let mut mcp_registered = false;
+    if mcp_built {
+        let mcp_bin = root.join("target").join("release").join("powertool-mcp");
+        match try_register_mcp_with_claude(&mcp_bin) {
+            Ok(true) => {
+                println!("Registered MCP server with Claude Code (`claude mcp add godot`)");
+                mcp_registered = true;
+            },
+            Ok(false) => {
+                println!("Claude Code CLI not found on PATH — skipping `claude mcp add`.");
+            },
+            Err(e) => {
+                eprintln!("Warning: auto-registering MCP with Claude Code failed: {e}");
+                eprintln!(
+                    "  You can retry with: claude mcp add godot -- {}",
+                    mcp_bin.display()
+                );
+            },
+        }
     }
 
     // --- 8. Build LSP bridge ---
@@ -696,12 +829,25 @@ fn cmd_init(
         .status()
         .context("Failed to build LSP bridge")?;
 
-    if status.success() {
+    let lsp_built = status.success();
+    if lsp_built {
         let lsp_bin = root.join("target").join("release").join("powertool-lsp-bridge");
         println!("LSP bridge built: {}", lsp_bin.display());
     } else {
         eprintln!("Warning: LSP bridge build failed. You can retry with:");
         eprintln!("  cargo build -p powertool-lsp-bridge --release");
+    }
+
+    // --- 8b. Install LSP config for Claude Code (auto, if detected) ---
+    let mut lsp_installed = false;
+    if lsp_built && claude_code_detected() {
+        match cmd_lsp_bridge_install("claude") {
+            Ok(()) => lsp_installed = true,
+            Err(e) => {
+                eprintln!("Warning: LSP bridge install failed: {e}");
+                eprintln!("  You can retry with: cargo xtask lsp-bridge install");
+            },
+        }
     }
 
     // --- Done ---
@@ -710,12 +856,16 @@ fn cmd_init(
     println!("  cargo xtask run            # Run the game");
     println!("  cargo xtask test           # Run all tests");
 
-    let mcp_bin = root.join("target").join("release").join("powertool-mcp");
-    println!(
-        "  claude mcp add godot -- {}  # Add MCP server to Claude Code",
-        mcp_bin.display()
-    );
-    println!("  cargo xtask lsp-bridge install  # Configure GDScript LSP");
+    if mcp_built && !mcp_registered {
+        let mcp_bin = root.join("target").join("release").join("powertool-mcp");
+        println!(
+            "  claude mcp add godot -- {}  # Register MCP server with Claude Code",
+            mcp_bin.display()
+        );
+    }
+    if lsp_built && !lsp_installed {
+        println!("  cargo xtask lsp-bridge install  # Configure GDScript LSP");
+    }
 
     Ok(())
 }
@@ -762,14 +912,14 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     if !opts.skip_docs {
         println!("\n=== Generating Godot API docs ===\n");
         let status = Command::new("cargo")
-            .args(["run", "-p", "powertool-docs", "--release", "--", "generate"])
+            .args(["run", "-p", "powertool-godot-docs", "--release", "--", "generate"])
             .current_dir(&root)
             .status()
             .context("Failed to run doc generator")?;
 
         if !status.success() {
             eprintln!("Warning: Doc generation failed. You can retry with:");
-            eprintln!("  cargo run -p powertool-docs -- generate");
+            eprintln!("  cargo run -p powertool-godot-docs -- generate");
         }
     } else {
         println!("\nSkipping API doc generation (--skip-docs)");
@@ -790,6 +940,7 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     }
 
     // --- 6. Build MCP server ---
+    let mut mcp_built = false;
     if !opts.skip_mcp {
         println!("\n=== Building MCP server ===\n");
         let status = Command::new("cargo")
@@ -801,6 +952,7 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         if status.success() {
             let mcp_bin = root.join("target").join("release").join("powertool-mcp");
             println!("MCP server built: {}", mcp_bin.display());
+            mcp_built = true;
         } else {
             eprintln!("Warning: MCP server build failed. You can retry with:");
             eprintln!("  cargo build -p powertool-mcp --release");
@@ -809,8 +961,33 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         println!("\nSkipping MCP server build (--skip-mcp)");
     }
 
+    // --- 6b. Register MCP with Claude Code (auto, if detected) ---
+    let mut mcp_registered = false;
+    if mcp_built && !opts.skip_mcp_add {
+        let mcp_bin = root.join("target").join("release").join("powertool-mcp");
+        match try_register_mcp_with_claude(&mcp_bin) {
+            Ok(true) => {
+                println!("Registered MCP server with Claude Code (`claude mcp add godot`)");
+                mcp_registered = true;
+            },
+            Ok(false) => {
+                println!("Claude Code CLI not found on PATH — skipping `claude mcp add`.");
+            },
+            Err(e) => {
+                eprintln!("Warning: auto-registering MCP with Claude Code failed: {e}");
+                eprintln!(
+                    "  You can retry with: claude mcp add godot -- {}",
+                    mcp_bin.display()
+                );
+            },
+        }
+    } else if mcp_built && opts.skip_mcp_add {
+        println!("Skipping `claude mcp add` (--skip-mcp-add)");
+    }
+
     // --- 7. Build LSP bridge ---
-    if !opts.skip_mcp {
+    let mut lsp_built = false;
+    if !opts.skip_lsp {
         println!("\n=== Building LSP bridge ===\n");
         let status = Command::new("cargo")
             .args(["build", "-p", "powertool-lsp-bridge", "--release"])
@@ -821,10 +998,31 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         if status.success() {
             let lsp_bin = root.join("target").join("release").join("powertool-lsp-bridge");
             println!("LSP bridge built: {}", lsp_bin.display());
+            lsp_built = true;
         } else {
             eprintln!("Warning: LSP bridge build failed. You can retry with:");
             eprintln!("  cargo build -p powertool-lsp-bridge --release");
         }
+    } else {
+        println!("\nSkipping LSP bridge build (--skip-lsp)");
+    }
+
+    // --- 7b. Install LSP config for Claude Code (auto, if detected) ---
+    let mut lsp_installed = false;
+    if lsp_built && !opts.skip_lsp_install {
+        if claude_code_detected() {
+            match cmd_lsp_bridge_install("claude") {
+                Ok(()) => lsp_installed = true,
+                Err(e) => {
+                    eprintln!("Warning: LSP bridge install failed: {e}");
+                    eprintln!("  You can retry with: cargo xtask lsp-bridge install");
+                },
+            }
+        } else {
+            println!("Claude Code CLI not found on PATH — skipping LSP auto-install.");
+        }
+    } else if lsp_built && opts.skip_lsp_install {
+        println!("Skipping LSP auto-install (--skip-lsp-install)");
     }
 
     // --- Done ---
@@ -833,12 +1031,14 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     println!("  cargo xtask run            # Run the game");
     println!("  cargo xtask test           # Run all tests");
 
-    if !opts.skip_mcp {
+    if mcp_built && !mcp_registered {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
         println!(
-            "  claude mcp add godot -- {}  # Add MCP server to Claude Code",
+            "  claude mcp add godot -- {}  # Register MCP server with Claude Code",
             mcp_bin.display()
         );
+    }
+    if lsp_built && !lsp_installed {
         println!("  cargo xtask lsp-bridge install  # Configure GDScript LSP");
     }
 
@@ -988,8 +1188,9 @@ fn cmd_build(release: bool, web: bool, threads: bool) -> Result<()> {
     if !extension_enabled() {
         bail!(
             "Rust extension is not enabled.\n\
-             To enable it, add \"extension\" to the workspace members in Cargo.toml.\n\
-             See \"Enabling the Rust GDExtension\" in README.md for details."
+             To enable it, uncomment \"addons/sample_extension/rust\" in the workspace\n\
+             members list of Cargo.toml.\n\
+             See \"Rust GDExtension (Optional)\" in README.md for details."
         );
     }
 
@@ -1007,7 +1208,7 @@ fn cmd_build_native(release: bool, mode: &str) -> Result<()> {
 
     let root = project_root()?;
     let mut cmd = Command::new("cargo");
-    cmd.arg("build").arg("-p").arg("extension");
+    cmd.arg("build").arg("-p").arg("sample_extension");
 
     if release {
         cmd.arg("--release");
@@ -1107,7 +1308,7 @@ fn cmd_build_wasm(release: bool, threads: bool) -> Result<()> {
 
     let web_bin_dir = godot_dir()?
         .join("addons")
-        .join("extension")
+        .join("sample_extension")
         .join("bin")
         .join("web");
     fs::create_dir_all(&web_bin_dir)?;
@@ -1132,7 +1333,7 @@ fn cmd_build_wasm(release: bool, threads: bool) -> Result<()> {
             .arg("build")
             .arg("-Zbuild-std")
             .arg("-p")
-            .arg("extension")
+            .arg("sample_extension")
             .arg("--target")
             .arg("wasm32-unknown-emscripten");
 
@@ -1151,7 +1352,7 @@ fn cmd_build_wasm(release: bool, threads: bool) -> Result<()> {
         }
         cmd.current_dir(&root);
 
-        println!("\nRunning: cargo +nightly build -Zbuild-std -p extension \\");
+        println!("\nRunning: cargo +nightly build -Zbuild-std -p sample_extension \\");
         println!(
             "  --target wasm32-unknown-emscripten{}",
             if release { " --release" } else { "" }
@@ -1169,7 +1370,7 @@ fn cmd_build_wasm(release: bool, threads: bool) -> Result<()> {
             bail!("WASM build failed ({dest_name})");
         }
 
-        let src = target_dir.join("extension.wasm");
+        let src = target_dir.join("sample_extension.wasm");
         let dst = web_bin_dir.join(dest_name);
         if src.exists() {
             fs::copy(&src, &dst)
@@ -1177,7 +1378,7 @@ fn cmd_build_wasm(release: bool, threads: bool) -> Result<()> {
             println!("Copied -> {}", dst.display());
         } else {
             bail!(
-                "Expected output not found: {}\nCheck that the crate name is 'extension'.",
+                "Expected output not found: {}\nCheck that the crate name is 'sample_extension'.",
                 src.display()
             );
         }
@@ -1187,22 +1388,26 @@ fn cmd_build_wasm(release: bool, threads: bool) -> Result<()> {
     if threads {
         println!("--- WASM build 1/2: nothreads ---");
     }
-    run_wasm_build("", &["--features", "nothreads"], "extension.wasm")?;
+    run_wasm_build("", &["--features", "nothreads"], "sample_extension.wasm")?;
 
     if threads {
         println!("\n--- WASM build 2/2: threaded ---");
-        run_wasm_build(WASM_RUSTFLAGS_THREADS, &[], "extension.threads.wasm")?;
+        run_wasm_build(
+            WASM_RUSTFLAGS_THREADS,
+            &[],
+            "sample_extension.threads.wasm",
+        )?;
     }
 
     println!("\nWASM build complete!");
     println!(
         "  Nothreads: {}",
-        web_bin_dir.join("extension.wasm").display()
+        web_bin_dir.join("sample_extension.wasm").display()
     );
     if threads {
         println!(
             "  Threaded:  {}",
-            web_bin_dir.join("extension.threads.wasm").display()
+            web_bin_dir.join("sample_extension.threads.wasm").display()
         );
     }
     println!(
@@ -1704,8 +1909,8 @@ fn is_godot_export_file(path: &Path) -> bool {
         .unwrap_or_default();
 
     name.starts_with("godot.")
-        || name == "extension.wasm"
-        || name == "extension.threads.wasm"
+        || name == "sample_extension.wasm"
+        || name == "sample_extension.threads.wasm"
         || GODOT_EXPORT_EXTENSIONS
             .iter()
             .any(|ext| name.ends_with(ext) && name.starts_with("godot"))
@@ -2011,7 +2216,7 @@ fn cmd_skill_install(target: &str) -> Result<()> {
         copy_dir_recursive(&doc_api_source, &doc_api_dest)?;
     } else {
         println!(
-            "Note: API docs not generated yet. Run 'cargo run -p powertool-docs -- generate' first,\n\
+            "Note: API docs not generated yet. Run 'cargo run -p powertool-godot-docs -- generate' first,\n\
              then 'cargo xtask skill update' to include them."
         );
     }

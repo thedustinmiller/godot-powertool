@@ -13,14 +13,14 @@ All files below are in `${CLAUDE_SKILL_DIR}/`. Load progressively — read each 
 
 | File | Purpose | When to read |
 |------|---------|--------------|
-| `quirks.md` | Known Godot gotchas and workarounds | Before writing any code |
-| `gdscript.md` | GDScript syntax reference | Before writing any code |
-| `scene-generation.md` | Building `.tscn` files via headless GDScript builders | Targets include `.tscn` |
-| `script-generation.md` | Writing runtime `.gd` scripts for node behavior | Targets include `.gd` |
-| `coordination.md` | Ordering scene + script generation, headless validation | Targets include both `.tscn` and `.gd` |
+| `gdscript.md` | GDScript syntax, types, and runtime patterns | Before writing any GDScript |
+| `quirks.md` | Known Godot/GDScript gotchas and workarounds | Before writing any code |
+| `gdextension.md` | Native extension loading, parse-time pitfalls, optional addon pattern | Working on a `.gdextension`, gdext/godot-cpp code, or an optional native addon |
 | `doc_api/_common.md` | Index of ~128 common Godot classes (one-line each) | Need API ref; scan to find class names |
 | `doc_api/_other.md` | Index of ~732 remaining Godot classes | Need API ref; class isn't in `_common.md` |
 | `doc_api/{ClassName}.md` | Full API reference for a single Godot class | Need API ref; look up specific class |
+
+Scene and script *creation* now goes through the Godot MCP tools (live editor) and direct `.gd` / `.tscn` file writes (headless), not through bundled scene-builder scripts. The "MCP Tools" section below lists the relevant tools.
 
 ## Project Setup (xtask)
 
@@ -94,7 +94,5 @@ For CPU-heavy scenes where `_process()` starves the debugger channel, use `take_
 
 - **Launch editor first**: `launch_editor` — enables full MCP toolset, LSP diagnostics, and screenshots
 - **Import assets** before using them: `timeout 60 godot --headless --import`
-- **Validate** after writing code: `timeout 60 godot --headless --quit`
-- **Scene builders** are headless GDScript scripts that produce `.tscn` files (see `scene-generation.md`)
-- **Runtime scripts** are `.gd` files that attach to nodes (see `script-generation.md`)
-- When both are needed, **generate scenes first**, then scripts (scenes create nodes that scripts attach to)
+- **Validate** after writing code: `timeout 30 godot --headless --path <project_dir> --quit` — exit 0 means all scripts parsed and scenes loaded; non-zero or timeout means errors in stderr (parse errors, missing resources, circular deps)
+- When creating scenes and scripts together, do scenes first so the nodes exist for the scripts to reference. Match the script's `extends` to the node it attaches to, and connect signals in the script's `_ready()` (not at build time)

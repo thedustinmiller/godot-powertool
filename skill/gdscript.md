@@ -220,6 +220,39 @@ while condition:
     pass
 ```
 
+## Script File Layout
+
+A runtime script attaches to a node and `extends` its type. Within the file, this ordering keeps the shape predictable for readers and tools:
+
+```gdscript
+extends CharacterBody2D
+## One-line purpose.
+
+# 1. Signals
+signal health_changed(new_value: int)
+
+# 2. Exports
+@export var max_health: int = 100
+
+# 3. Node refs (resolved at _ready)
+@onready var sprite: Sprite2D = $Sprite2D
+
+# 4. Private state
+var _current_health: int
+
+# 5. Lifecycle
+func _ready() -> void: ...
+func _physics_process(delta: float) -> void: ...
+
+# 6. Public methods
+func take_damage(amount: int) -> void: ...
+
+# 7. Private methods and signal handlers
+func _on_hitbox_body_entered(body: Node) -> void: ...
+```
+
+`extends` must match the node type the script attaches to. Resolve node references with `@onready var x: Type = $Name`, not `get_node()` in `_process()`. Connect signals in `_ready()`, not at scene-build time.
+
 ## Classes
 
 ```gdscript
