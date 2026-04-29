@@ -139,16 +139,21 @@ pub fn godot_user_data_dir(project_name: &str) -> PathBuf {
     }
 }
 
-/// Get the platform-specific extension library filename.
-pub fn extension_lib_name() -> &'static str {
+/// Get the platform-specific extension library filename for a given basename.
+///
+/// `basename` is the GDExtension's library basename — e.g. `sample_extension`
+/// produces `libsample_extension.so` on Linux, `sample_extension.dll` on
+/// Windows, `libsample_extension.dylib` on macOS. Configured via
+/// `[extension].lib_basename` in `template.toml`.
+pub fn extension_lib_name(basename: &str) -> String {
     #[cfg(target_os = "linux")]
-    return "libsample_extension.so";
+    return format!("lib{basename}.so");
     #[cfg(target_os = "windows")]
-    return "sample_extension.dll";
+    return format!("{basename}.dll");
     #[cfg(target_os = "macos")]
-    return "libsample_extension.dylib";
+    return format!("lib{basename}.dylib");
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    return "libsample_extension.so";
+    return format!("lib{basename}.so");
 }
 
 /// Get the platform subdirectory name for extension binaries.

@@ -44,6 +44,24 @@ pub struct Manifest {
     pub source: Source,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied: Option<Applied>,
+    #[serde(default, skip_serializing_if = "ManagedPathsConfig::is_empty")]
+    pub managed_paths: ManagedPathsConfig,
+}
+
+/// Downstream-controlled tweaks to the managed-path set. Currently lets a
+/// downstream opt out of paths it doesn't want re-fetched on every update
+/// (e.g. the bundled `addons/sample_extension/` demo).
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ManagedPathsConfig {
+    /// Paths from `MANAGED_PATHS` to skip during sync. Unknown entries warn.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+impl ManagedPathsConfig {
+    fn is_empty(&self) -> bool {
+        self.exclude.is_empty()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

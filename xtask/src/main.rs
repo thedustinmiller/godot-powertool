@@ -16,7 +16,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 mod update;
 use powertool_common::{
-    config::load_template_config,
+    config::{ExtensionConfig, load_template_config},
     platform::{
         extension_lib_name, extension_platform_dir, find_godot_binary, godot_download_info,
         open_path,
@@ -468,12 +468,58 @@ fn godot_binary() -> Result<PathBuf> {
     find_godot_binary(Some(&root))
 }
 
-fn extension_bin_dir() -> Result<PathBuf> {
-    Ok(godot_dir()?
-        .join("addons")
-        .join("sample_extension")
-        .join("bin")
-        .join(extension_platform_dir()))
+/// Resolved GDExtension paths derived from `template.toml`'s `[extension]`
+/// block (or the defaults that match the bundled `sample_extension` demo).
+struct ExtensionPaths {
+    /// Cargo package name for the GDExtension crate (`-p` target).
+    crate_name: String,
+    /// Workspace-relative path to the crate, used when matching against
+    /// `[workspace].members` in the root `Cargo.toml`.
+    crate_path: String,
+    /// Absolute path to the deploy directory (binaries land in `bin/<plat>/`).
+    deploy_path: PathBuf,
+    /// Library basename — produces `lib{basename}.so`, `{basename}.dll`, etc.
+    lib_basename: String,
+}
+
+impl ExtensionPaths {
+    fn load(root: &Path) -> Result<Self> {
+        let cfg = load_template_config(root)?.extension;
+        Ok(Self::from_parts(root, &cfg))
+    }
+
+    fn from_parts(root: &Path, cfg: &ExtensionConfig) -> Self {
+        Self {
+            crate_name: cfg.crate_name.clone(),
+            crate_path: cfg.crate_path.clone(),
+            deploy_path: root.join(&cfg.deploy_path),
+            lib_basename: cfg.lib_basename.clone(),
+        }
+    }
+
+    fn lib_filename(&self) -> String {
+        extension_lib_name(&self.lib_basename)
+    }
+
+    fn bin_dir(&self) -> PathBuf {
+        self.deploy_path.join("bin").join(extension_platform_dir())
+    }
+
+    fn web_bin_dir(&self) -> PathBuf {
+        self.deploy_path.join("bin").join("web")
+    }
+
+    fn wasm_artifact(&self, threaded: bool) -> String {
+        if threaded {
+            format!("{}.threads.wasm", self.lib_basename)
+        } else {
+            format!("{}.wasm", self.lib_basename)
+        }
+    }
+}
+
+fn extension_paths() -> Result<ExtensionPaths> {
+    ExtensionPaths::load(&project_root()?)
 }
 
 /// Copy the contents of `<root>/addons/` into `<root>/godot/addons/`.
@@ -489,9 +535,9 @@ fn copy_addons(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Check if the sample_extension crate is listed in workspace members in
-/// root Cargo.toml.
-fn extension_enabled() -> bool {
+/// Check if the GDExtension crate is listed in workspace members in
+/// root `Cargo.toml`. The crate path comes from `[extension].crate_path`.
+fn extension_enabled(ext: &ExtensionPaths) -> bool {
     let Ok(root) = project_root() else {
         return false;
     };
@@ -507,7 +553,7 @@ fn extension_enabled() -> bool {
         .is_some_and(|members| {
             members
                 .iter()
-                .any(|v| v.as_str().is_some_and(|s| s == "addons/sample_extension/rust"))
+                .any(|v| v.as_str().is_some_and(|s| s == ext.crate_path))
         })
 }
 
@@ -747,7 +793,8 @@ fn cmd_init(
     }
 
     // --- 4. Build GDExtension (only if enabled in workspace) ---
-    if extension_enabled() {
+    let ext = ExtensionPaths::load(&root)?;
+    if extension_enabled(&ext) {
         println!("\nBuilding GDExtension...");
         cmd_build(false, false, false, false)?;
     }
@@ -896,7 +943,8 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     copy_addons(&root)?;
 
     // --- 3. Build GDExtension (only if enabled in workspace) ---
-    if extension_enabled() {
+    let ext = ExtensionPaths::load(&root)?;
+    if extension_enabled(&ext) {
         println!("\nBuilding GDExtension...");
         cmd_build(false, false, false, false)?;
     }
@@ -1193,33 +1241,35 @@ fn download_godot(version: &str, tools_dir: &Path) -> Result<()> {
 }
 
 fn cmd_build(release: bool, web: bool, nothreads: bool, both: bool) -> Result<()> {
-    if !extension_enabled() {
+    let ext = extension_paths()?;
+    if !extension_enabled(&ext) {
         bail!(
             "Rust extension is not enabled.\n\
-             To enable it, uncomment \"addons/sample_extension/rust\" in the workspace\n\
+             To enable it, uncomment \"{}\" in the workspace\n\
              members list of Cargo.toml.\n\
-             See \"Rust GDExtension (Optional)\" in README.md for details."
+             See \"Rust GDExtension (Optional)\" in README.md for details.",
+            ext.crate_path
         );
     }
 
     let mode = if release { "release" } else { "debug" };
 
     if web {
-        cmd_build_wasm(release, nothreads, both)
+        cmd_build_wasm(release, nothreads, both, &ext)
     } else {
         // Native callers (including init/setup which pass false/false/false)
         // ignore the threading flags — they're WASM-only.
         let _ = (nothreads, both);
-        cmd_build_native(release, mode)
+        cmd_build_native(release, mode, &ext)
     }
 }
 
-fn cmd_build_native(release: bool, mode: &str) -> Result<()> {
+fn cmd_build_native(release: bool, mode: &str, ext: &ExtensionPaths) -> Result<()> {
     println!("Building GDExtension ({mode})...");
 
     let root = project_root()?;
     let mut cmd = Command::new("cargo");
-    cmd.arg("build").arg("-p").arg("sample_extension");
+    cmd.arg("build").arg("-p").arg(&ext.crate_name);
 
     if release {
         cmd.arg("--release");
@@ -1235,8 +1285,9 @@ fn cmd_build_native(release: bool, mode: &str) -> Result<()> {
     }
 
     let target_dir = root.join("target").join(mode);
-    let lib_src = target_dir.join(extension_lib_name());
-    let lib_dst = extension_bin_dir()?.join(extension_lib_name());
+    let lib_name = ext.lib_filename();
+    let lib_src = target_dir.join(&lib_name);
+    let lib_dst = ext.bin_dir().join(&lib_name);
 
     if lib_src.exists() {
         fs::create_dir_all(lib_dst.parent().unwrap())?;
@@ -1261,7 +1312,7 @@ const WASM_RUSTFLAGS_THREADS: &str = concat!(
     "-C target-feature=+atomics",
 );
 
-fn cmd_build_wasm(release: bool, nothreads: bool, both: bool) -> Result<()> {
+fn cmd_build_wasm(release: bool, nothreads: bool, both: bool, ext: &ExtensionPaths) -> Result<()> {
     // Selection matrix:
     //   default        → threaded only  (matches the default export preset)
     //   --nothreads    → single-threaded only
@@ -1324,11 +1375,7 @@ fn cmd_build_wasm(release: bool, nothreads: bool, both: bool) -> Result<()> {
         println!("Run 'cargo xtask setup' first to download Godot.");
     }
 
-    let web_bin_dir = godot_dir()?
-        .join("addons")
-        .join("sample_extension")
-        .join("bin")
-        .join("web");
+    let web_bin_dir = ext.web_bin_dir();
     fs::create_dir_all(&web_bin_dir)?;
 
     let target_dir = root
@@ -1351,7 +1398,7 @@ fn cmd_build_wasm(release: bool, nothreads: bool, both: bool) -> Result<()> {
             .arg("build")
             .arg("-Zbuild-std")
             .arg("-p")
-            .arg("sample_extension")
+            .arg(&ext.crate_name)
             .arg("--target")
             .arg("wasm32-unknown-emscripten");
 
@@ -1370,7 +1417,10 @@ fn cmd_build_wasm(release: bool, nothreads: bool, both: bool) -> Result<()> {
         }
         cmd.current_dir(&root);
 
-        println!("\nRunning: cargo +nightly build -Zbuild-std -p sample_extension \\");
+        println!(
+            "\nRunning: cargo +nightly build -Zbuild-std -p {} \\",
+            ext.crate_name
+        );
         println!(
             "  --target wasm32-unknown-emscripten{}",
             if release { " --release" } else { "" }
@@ -1388,7 +1438,7 @@ fn cmd_build_wasm(release: bool, nothreads: bool, both: bool) -> Result<()> {
             bail!("WASM build failed ({dest_name})");
         }
 
-        let src = target_dir.join("sample_extension.wasm");
+        let src = target_dir.join(format!("{}.wasm", ext.lib_basename));
         let dst = web_bin_dir.join(dest_name);
         if src.exists() {
             fs::copy(&src, &dst)
@@ -1396,42 +1446,42 @@ fn cmd_build_wasm(release: bool, nothreads: bool, both: bool) -> Result<()> {
             println!("Copied -> {}", dst.display());
         } else {
             bail!(
-                "Expected output not found: {}\nCheck that the crate name is 'sample_extension'.",
-                src.display()
+                "Expected output not found: {}\nCheck that the crate name is '{}'.",
+                src.display(),
+                ext.crate_name
             );
         }
         Ok(())
     };
 
+    let threaded_artifact = ext.wasm_artifact(true);
+    let nothreads_artifact = ext.wasm_artifact(false);
+
     if build_threaded && build_nothreads {
         println!("--- WASM build 1/2: threaded ---");
     }
     if build_threaded {
-        run_wasm_build(
-            WASM_RUSTFLAGS_THREADS,
-            &[],
-            "sample_extension.threads.wasm",
-        )?;
+        run_wasm_build(WASM_RUSTFLAGS_THREADS, &[], &threaded_artifact)?;
     }
 
     if build_threaded && build_nothreads {
         println!("\n--- WASM build 2/2: nothreads ---");
     }
     if build_nothreads {
-        run_wasm_build("", &["--features", "nothreads"], "sample_extension.wasm")?;
+        run_wasm_build("", &["--features", "nothreads"], &nothreads_artifact)?;
     }
 
     println!("\nWASM build complete!");
     if build_threaded {
         println!(
             "  Threaded:  {}",
-            web_bin_dir.join("sample_extension.threads.wasm").display()
+            web_bin_dir.join(&threaded_artifact).display()
         );
     }
     if build_nothreads {
         println!(
             "  Nothreads: {}",
-            web_bin_dir.join("sample_extension.wasm").display()
+            web_bin_dir.join(&nothreads_artifact).display()
         );
     }
     println!(
@@ -1444,8 +1494,9 @@ fn cmd_build_wasm(release: bool, nothreads: bool, both: bool) -> Result<()> {
 }
 
 fn cmd_run(editor: bool, godot_args: &[String]) -> Result<()> {
-    if extension_enabled() {
-        let lib_path = extension_bin_dir()?.join(extension_lib_name());
+    let ext = extension_paths()?;
+    if extension_enabled(&ext) {
+        let lib_path = ext.bin_dir().join(ext.lib_filename());
         if !lib_path.exists() {
             println!("GDExtension not found, building...");
             cmd_build(false, false, false, false)?;
@@ -1506,8 +1557,9 @@ fn cmd_test(rust_only: bool, godot_only: bool, verbose: bool, filter: Option<&st
     if !rust_only {
         println!("\nRunning Godot GUT tests...\n");
 
-        if extension_enabled() {
-            let lib_path = extension_bin_dir()?.join(extension_lib_name());
+        let ext = extension_paths()?;
+        if extension_enabled(&ext) {
+            let lib_path = ext.bin_dir().join(ext.lib_filename());
             if !lib_path.exists() {
                 println!("GDExtension not found, building...");
                 cmd_build(false, false, false, false)?;
@@ -1573,7 +1625,7 @@ fn cmd_clean(all: bool) -> Result<()> {
         .status()
         .context("Failed to run cargo clean")?;
 
-    let bin_dir = extension_bin_dir()?;
+    let bin_dir = extension_paths()?.bin_dir();
     if bin_dir.exists() {
         println!("Removing extension binaries...");
         fs::remove_dir_all(&bin_dir)?;
@@ -1643,8 +1695,9 @@ fn cmd_doctor() -> Result<()> {
     }
 
     print!("GDExtension:    ");
-    if extension_enabled() {
-        let lib_path = extension_bin_dir()?.join(extension_lib_name());
+    let ext = extension_paths()?;
+    if extension_enabled(&ext) {
+        let lib_path = ext.bin_dir().join(ext.lib_filename());
         if lib_path.exists() {
             println!("\x1b[32m✓\x1b[0m enabled and built");
         } else {
@@ -1928,23 +1981,24 @@ const GODOT_EXPORT_EXTENSIONS: &[&str] = &[
     "html", "js", "wasm", "pck", "png", "json", "worker.js",
 ];
 
-fn is_godot_export_file(path: &Path) -> bool {
+fn is_godot_export_file(path: &Path, ext: &ExtensionPaths) -> bool {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
 
     name.starts_with("godot.")
-        || name == "sample_extension.wasm"
-        || name == "sample_extension.threads.wasm"
+        || name == ext.wasm_artifact(false)
+        || name == ext.wasm_artifact(true)
         || GODOT_EXPORT_EXTENSIONS
             .iter()
-            .any(|ext| name.ends_with(ext) && name.starts_with("godot"))
+            .any(|e| name.ends_with(e) && name.starts_with("godot"))
 }
 
 fn cmd_web_export(release: bool) -> Result<()> {
     println!("Exporting Godot project for web...\n");
 
+    let ext = extension_paths()?;
     let godot_path = godot_dir()?;
     let web = web_dir()?;
     let export_dir = web.join("public");
@@ -1953,7 +2007,7 @@ fn cmd_web_export(release: bool) -> Result<()> {
     if export_dir.exists() {
         for entry in fs::read_dir(&export_dir)? {
             let path = entry?.path();
-            if path.is_file() && is_godot_export_file(&path) {
+            if path.is_file() && is_godot_export_file(&path, &ext) {
                 fs::remove_file(&path)?;
             }
         }
