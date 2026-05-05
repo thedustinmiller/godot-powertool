@@ -108,3 +108,5 @@ doc_api/
 *.bak
 *.tmp
 references/
+doc_source/
+||
