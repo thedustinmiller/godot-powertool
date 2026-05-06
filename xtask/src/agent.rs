@@ -1,0 +1,397 @@
+use std::{
+    fs,
+    io::{self, BufRead},
+    path::Path,
+    process::{Command, Stdio},
+};
+
+use anyhow::{Context, Result, bail};
+
+use super::{cmd_lsp_bridge_install, project_root};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentTarget {
+    ClaudeCode,
+    Codex,
+    Cursor,
+    Skip,
+}
+
+impl AgentTarget {
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "claude" | "claude-code" | "claude_code" => Some(Self::ClaudeCode),
+            "codex" | "codex-cli" | "codex_cli" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
+            "none" | "skip" | "no" => Some(Self::Skip),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn skill_target(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("claude"),
+            Self::Codex => Some("codex"),
+            Self::Cursor | Self::Skip => None,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex CLI",
+            Self::Cursor => "Cursor",
+            Self::Skip => "Skip agent setup",
+        }
+    }
+
+    pub(crate) fn instruction_files(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeCode => &["CLAUDE.md"],
+            Self::Codex | Self::Cursor => &["AGENTS.md"],
+            Self::Skip => &[],
+        }
+    }
+}
+
+pub(crate) fn prompt_agent_target(configured: Option<&str>) -> Result<AgentTarget> {
+    if let Some(value) = configured {
+        return AgentTarget::from_str(value).with_context(|| {
+            format!("Unknown agent target `{value}`. Expected claude, codex, cursor, or none.")
+        });
+    }
+
+    println!("Select an AI assistant to configure:");
+    println!("  1) Claude Code");
+    println!("  2) Codex CLI");
+    println!("  3) Cursor");
+    println!("  s) Skip agent setup");
+
+    loop {
+        eprint!("Agent [1]: ");
+        let mut input = String::new();
+        io::stdin().lock().read_line(&mut input)?;
+        let trimmed = input.trim();
+        match trimmed {
+            "" | "1" => return Ok(AgentTarget::ClaudeCode),
+            "2" => return Ok(AgentTarget::Codex),
+            "3" => return Ok(AgentTarget::Cursor),
+            "s" | "S" => return Ok(AgentTarget::Skip),
+            other => {
+                if let Some(target) = AgentTarget::from_str(other) {
+                    return Ok(target);
+                }
+                eprintln!("Please enter 1, 2, 3, s, or a target name.");
+            }
+        }
+    }
+}
+
+fn claude_code_detected() -> bool {
+    which::which("claude").is_ok()
+}
+
+fn codex_detected() -> bool {
+    which::which("codex").is_ok()
+}
+
+fn try_register_mcp_with_claude(mcp_bin: &Path) -> Result<bool> {
+    if !claude_code_detected() {
+        return Ok(false);
+    }
+    let mcp_path = mcp_bin.to_string_lossy();
+
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", "godot"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let status = Command::new("claude")
+        .args(["mcp", "add", "godot", "--", &mcp_path])
+        .status()
+        .context("Failed to invoke `claude mcp add`")?;
+
+    if !status.success() {
+        bail!(
+            "`claude mcp add godot -- {mcp_path}` exited with {:?}",
+            status.code()
+        );
+    }
+    Ok(true)
+}
+
+fn try_register_mcp_with_codex(mcp_bin: &Path) -> Result<bool> {
+    if !codex_detected() {
+        return Ok(false);
+    }
+    let mcp_path = mcp_bin.to_string_lossy();
+
+    let _ = Command::new("codex")
+        .args(["mcp", "remove", "godot"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let status = Command::new("codex")
+        .args(["mcp", "add", "godot", "--", &mcp_path])
+        .status()
+        .context("Failed to invoke `codex mcp add`")?;
+
+    if !status.success() {
+        bail!(
+            "`codex mcp add godot -- {mcp_path}` exited with {:?}",
+            status.code()
+        );
+    }
+    Ok(true)
+}
+
+fn install_mcp_for_cursor(root: &Path, mcp_bin: &Path) -> Result<bool> {
+    let cursor_dir = root.join(".cursor");
+    let settings_path = cursor_dir.join("mcp.json");
+    let mcp_path = mcp_bin.to_string_lossy();
+
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let contents =
+            fs::read_to_string(&settings_path).context("Failed to read .cursor/mcp.json")?;
+        serde_json::from_str(&contents).context("Failed to parse .cursor/mcp.json")?
+    } else {
+        serde_json::json!({})
+    };
+
+    let obj = settings
+        .as_object_mut()
+        .context(".cursor/mcp.json is not an object")?;
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    servers
+        .as_object_mut()
+        .context("mcpServers is not an object")?
+        .insert(
+            "godot".to_string(),
+            serde_json::json!({
+                "type": "stdio",
+                "command": mcp_path,
+                "args": []
+            }),
+        );
+
+    fs::create_dir_all(&cursor_dir).context("Failed to create .cursor directory")?;
+    let formatted =
+        serde_json::to_string_pretty(&settings).context("Failed to serialize .cursor/mcp.json")?;
+    fs::write(&settings_path, formatted + "\n").context("Failed to write .cursor/mcp.json")?;
+    println!("Wrote Cursor MCP config to {}", settings_path.display());
+    Ok(true)
+}
+
+pub(crate) fn try_register_mcp_for_agent(agent: AgentTarget, mcp_bin: &Path) -> Result<bool> {
+    match agent {
+        AgentTarget::ClaudeCode => try_register_mcp_with_claude(mcp_bin),
+        AgentTarget::Codex => try_register_mcp_with_codex(mcp_bin),
+        AgentTarget::Cursor => install_mcp_for_cursor(&project_root()?, mcp_bin),
+        AgentTarget::Skip => Ok(false),
+    }
+}
+
+fn install_cursor_rules_at(root: &Path) -> Result<()> {
+    let rules_dir = root.join(".cursor").join("rules");
+    let rule_path = rules_dir.join("godot-powertool.mdc");
+    fs::create_dir_all(&rules_dir).context("Failed to create .cursor/rules directory")?;
+
+    let content = r#"---
+description: Godot PowerTool project guidance
+globs: **/*.gd, **/*.tscn, **/*.tres, **/*.gdextension, Cargo.toml
+alwaysApply: false
+---
+
+Use the Godot PowerTool MCP server for live editor operations, scene inspection, screenshots, and Godot-aware project actions when available.
+
+For Godot and GDScript work, load the project knowledge base before making broad changes:
+
+@skill/SKILL.md
+@skill/gdscript.md
+@skill/quirks.md
+@skill/gdextension.md
+
+Prefer existing scene resources and editor-backed changes over rebuilding scenes procedurally in scripts. Validate GDScript with the project tooling when edits touch runtime behavior.
+"#;
+
+    fs::write(&rule_path, content).context("Failed to write Cursor rule")?;
+    println!("Wrote Cursor project rule to {}", rule_path.display());
+    Ok(())
+}
+
+pub(crate) fn install_agent_editor_config(agent: AgentTarget) -> Result<()> {
+    match agent {
+        AgentTarget::ClaudeCode => {
+            if claude_code_detected() {
+                cmd_lsp_bridge_install("claude")
+            } else {
+                println!("Claude Code CLI not found on PATH - skipping LSP auto-install.");
+                Ok(())
+            }
+        }
+        AgentTarget::Cursor => install_cursor_rules_at(&project_root()?),
+        AgentTarget::Codex | AgentTarget::Skip => Ok(()),
+    }
+}
+
+pub(crate) fn print_mcp_retry(agent: AgentTarget, mcp_bin: &Path) {
+    match agent {
+        AgentTarget::ClaudeCode => println!(
+            "  claude mcp add godot -- {}  # Register MCP server with Claude Code",
+            mcp_bin.display()
+        ),
+        AgentTarget::Codex => println!(
+            "  codex mcp add godot -- {}  # Register MCP server with Codex CLI",
+            mcp_bin.display()
+        ),
+        AgentTarget::Cursor => {
+            println!("  cargo xtask mcp install cursor  # Print Cursor MCP config");
+        }
+        AgentTarget::Skip => {}
+    }
+}
+
+pub(crate) fn print_lsp_retry(agent: AgentTarget) {
+    match agent {
+        AgentTarget::ClaudeCode => {
+            println!("  cargo xtask lsp-bridge install claude  # Configure GDScript LSP");
+        }
+        AgentTarget::Cursor => {
+            println!("  Re-run `cargo xtask setup --agent cursor` to regenerate Cursor rules");
+        }
+        AgentTarget::Codex | AgentTarget::Skip => {}
+    }
+}
+
+fn copy_agent_instruction_files(root: &Path, source_dir: &Path, agent: AgentTarget) -> Result<()> {
+    for file in agent.instruction_files() {
+        let source = source_dir.join(file);
+        let dest = root.join(file);
+
+        if !source.exists() {
+            bail!(
+                "Agent instruction template not found at {}",
+                source.display()
+            );
+        }
+        if dest.exists() {
+            println!("Keeping existing {}", dest.display());
+            continue;
+        }
+
+        fs::copy(&source, &dest).with_context(|| {
+            format!("Failed to copy {} -> {}", source.display(), dest.display())
+        })?;
+        println!("Copied {}", dest.display());
+    }
+
+    Ok(())
+}
+
+pub(crate) fn install_agent_instruction_files(agent: AgentTarget) -> Result<()> {
+    let files = agent.instruction_files();
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    let root = project_root()?;
+    let source_dir = root.join("agent_templates");
+    if !source_dir.exists() {
+        bail!(
+            "Agent instruction template directory not found at {}",
+            source_dir.display()
+        );
+    }
+
+    println!("\n=== Installing agent instruction files ===\n");
+    copy_agent_instruction_files(&root, &source_dir, agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("godot-powertool-{name}-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn parses_agent_target_aliases() {
+        assert_eq!(
+            AgentTarget::from_str("claude-code"),
+            Some(AgentTarget::ClaudeCode)
+        );
+        assert_eq!(AgentTarget::from_str("codex_cli"), Some(AgentTarget::Codex));
+        assert_eq!(AgentTarget::from_str("cursor"), Some(AgentTarget::Cursor));
+        assert_eq!(AgentTarget::from_str("none"), Some(AgentTarget::Skip));
+        assert_eq!(AgentTarget::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn maps_instruction_files_by_agent() {
+        assert_eq!(AgentTarget::ClaudeCode.instruction_files(), &["CLAUDE.md"]);
+        assert_eq!(AgentTarget::Codex.instruction_files(), &["AGENTS.md"]);
+        assert_eq!(AgentTarget::Cursor.instruction_files(), &["AGENTS.md"]);
+        assert!(AgentTarget::Skip.instruction_files().is_empty());
+    }
+
+    #[test]
+    fn copies_instruction_files_without_overwriting_existing_work() {
+        let root = temp_dir("agent-root");
+        let templates = temp_dir("agent-templates");
+        fs::write(templates.join("AGENTS.md"), "template").unwrap();
+        fs::write(root.join("AGENTS.md"), "user-owned").unwrap();
+
+        copy_agent_instruction_files(&root, &templates, AgentTarget::Codex).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join("AGENTS.md")).unwrap(),
+            "user-owned"
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(templates).unwrap();
+    }
+
+    #[test]
+    fn cursor_mcp_merge_preserves_existing_servers() {
+        let root = temp_dir("cursor-mcp");
+        let cursor_dir = root.join(".cursor");
+        fs::create_dir_all(&cursor_dir).unwrap();
+        fs::write(
+            cursor_dir.join("mcp.json"),
+            r#"{"mcpServers":{"other":{"command":"other-bin"}}}"#,
+        )
+        .unwrap();
+
+        install_mcp_for_cursor(&root, Path::new("/tmp/powertool-mcp")).unwrap();
+
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(cursor_dir.join("mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            config["mcpServers"]["other"]["command"].as_str(),
+            Some("other-bin")
+        );
+        assert_eq!(
+            config["mcpServers"]["godot"]["type"].as_str(),
+            Some("stdio")
+        );
+        assert_eq!(
+            config["mcpServers"]["godot"]["command"].as_str(),
+            Some("/tmp/powertool-mcp")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+}

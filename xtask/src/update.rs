@@ -23,7 +23,8 @@ pub struct UpdateOptions {
     pub check_only: bool,
     /// Bypass the dirty-state guard for managed paths.
     pub force: bool,
-    /// First-time setup: create `.powertool.toml` from this URL (and ref) and exit.
+    /// First-time setup: create `.powertool.toml` from this URL (and ref) and
+    /// exit.
     pub bootstrap_url: Option<String>,
     pub bootstrap_ref: Option<String>,
 }
@@ -61,7 +62,10 @@ pub fn cmd_update(root: &Path, opts: UpdateOptions) -> Result<()> {
             managed_paths: ManagedPathsConfig::default(),
         };
         manifest::save(root, &m)?;
-        println!("Wrote {}. Run `cargo xtask update` to sync.", path.display());
+        println!(
+            "Wrote {}. Run `cargo xtask update` to sync.",
+            path.display()
+        );
         return Ok(());
     }
 
@@ -148,10 +152,7 @@ pub fn cmd_update(root: &Path, opts: UpdateOptions) -> Result<()> {
     for path in &managed {
         let stats = sync_one(&tmp.join(path), &root.join(path), opts.check_only)?;
         if stats.written > 0 || stats.deleted > 0 {
-            println!(
-                "  {path:30}  +{} -{}",
-                stats.written, stats.deleted
-            );
+            println!("  {path:30}  +{} -{}", stats.written, stats.deleted);
         }
         total.add(stats);
     }
@@ -240,7 +241,11 @@ fn sync_one(upstream: &Path, local: &Path, check_only: bool) -> Result<SyncStats
                 fs::create_dir_all(parent)?;
             }
             fs::copy(upstream, local).with_context(|| {
-                format!("Failed to copy {} -> {}", upstream.display(), local.display())
+                format!(
+                    "Failed to copy {} -> {}",
+                    upstream.display(),
+                    local.display()
+                )
             })?;
         }
         stats.written += 1;
@@ -419,7 +424,7 @@ pub fn write_init_manifest(root: &Path) -> Result<()> {
                  Bootstrap later with: cargo xtask update --bootstrap <git-url>"
             );
             return Ok(());
-        },
+        }
     };
 
     let git_ref = git_current_ref(root).unwrap_or_else(|| "main".to_string());
@@ -492,4 +497,85 @@ fn list_dirty_managed_paths(root: &Path, managed: &[&str]) -> Result<Vec<String>
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("godot-powertool-update-{name}-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn sync_one_check_only_reports_without_writing() {
+        let root = temp_dir("check-only");
+        let upstream = root.join("upstream");
+        let local = root.join("local");
+        fs::create_dir_all(&upstream).unwrap();
+        fs::create_dir_all(&local).unwrap();
+        fs::write(upstream.join("new.txt"), "new").unwrap();
+
+        let stats = sync_one(&upstream, &local, true).unwrap();
+
+        assert_eq!(stats.written, 1);
+        assert_eq!(stats.deleted, 0);
+        assert!(!local.join("new.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sync_one_mirrors_directory_and_removes_orphans() {
+        let root = temp_dir("mirror");
+        let upstream = root.join("upstream");
+        let local = root.join("local");
+        fs::create_dir_all(upstream.join("nested")).unwrap();
+        fs::create_dir_all(&local).unwrap();
+        fs::write(upstream.join("nested").join("keep.txt"), "upstream").unwrap();
+        fs::write(local.join("orphan.txt"), "local only").unwrap();
+
+        let stats = sync_one(&upstream, &local, false).unwrap();
+
+        assert_eq!(stats.written, 1);
+        assert_eq!(stats.deleted, 1);
+        assert_eq!(
+            fs::read_to_string(local.join("nested").join("keep.txt")).unwrap(),
+            "upstream"
+        );
+        assert!(!local.join("orphan.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sync_one_updates_single_file_without_touching_siblings() {
+        let root = temp_dir("single-file");
+        let upstream = root.join("upstream.txt");
+        let local_dir = root.join("local");
+        let local = local_dir.join("managed.txt");
+        fs::create_dir_all(&local_dir).unwrap();
+        fs::write(&upstream, "managed").unwrap();
+        fs::write(&local, "old").unwrap();
+        fs::write(local_dir.join("user.txt"), "user").unwrap();
+
+        let stats = sync_one(&upstream, &local, false).unwrap();
+
+        assert_eq!(stats.written, 1);
+        assert_eq!(stats.deleted, 0);
+        assert_eq!(fs::read_to_string(&local).unwrap(), "managed");
+        assert_eq!(
+            fs::read_to_string(local_dir.join("user.txt")).unwrap(),
+            "user"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
