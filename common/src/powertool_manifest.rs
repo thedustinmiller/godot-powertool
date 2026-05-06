@@ -29,6 +29,7 @@ pub const MANAGED_PATHS: &[&str] = &[
     "lsp-bridge",
     "godot_docs",
     "skill",
+    "agent_templates",
     "scripts",
     ".gitignore",
 ];

@@ -7,6 +7,8 @@ Unified template, Rust GDExtension, docs tool, and MCP/Skill bundle.
 ```bash
 # Setup; download Godot and GUT testing addon
 cargo xtask setup
+# or pick explicitly instead of using the setup prompt
+cargo xtask setup --agent codex
 
 # Open Godot editor
 cargo xtask editor
@@ -42,6 +44,7 @@ This project was originally a template that gave a quick start for using Rust as
 | `addons/sample_extension/` | Optional Rust GDExtension addon (gdextension manifest, plugin, Rust source) |
 | `web/` | Optional Vite frontend + Playwright tests             |
 | `skill/` | Agent knowledge base (GDScript ref, quirks, patterns) |
+| `agent_templates/` | Starter `AGENTS.md` and `CLAUDE.md` files copied during agent setup |
 | `scripts/` | GDScript helpers (MCP operations) |
 
 ## Configuration
@@ -60,7 +63,8 @@ docs = "4.6.2"
 ## CLI Reference
 
 ```bash
-cargo xtask setup              # Download Godot + GUT, initialize project
+cargo xtask setup              # Download Godot + GUT, initialize project, prompt for agent setup
+cargo xtask setup --agent cursor  # Configure Cursor instead of prompting
 cargo xtask build              # Build Rust GDExtension (if enabled)
 cargo xtask run                # Run the game
 cargo xtask editor             # Open Godot editor
@@ -87,8 +91,14 @@ cargo xtask skill remove       # Remove installed skill files
 
 cargo xtask mcp run            # Launch MCP server on stdio
 cargo xtask mcp install claude # Print setup instructions for Claude Code
+cargo xtask mcp install codex  # Print setup instructions for Codex CLI
 cargo xtask mcp install cursor # Print config for Cursor
 ```
+
+Setup also copies root instruction files for the selected agent when they do
+not already exist: `AGENTS.md` for Codex CLI and Cursor, and `CLAUDE.md` for
+Claude Code. The copied `AGENTS.md` is intentionally a starter file; keep it
+updated as the generated project becomes a real game or app.
 
 ## MCP Server
 
@@ -134,6 +144,20 @@ cargo build -p powertool-mcp --release
 
 # Add to Claude Code
 claude mcp add godot -- ./target/release/powertool-mcp
+
+# Add to Codex CLI
+codex mcp add godot -- ./target/release/powertool-mcp
+
+# Add to Cursor project config (.cursor/mcp.json)
+{
+  "mcpServers": {
+    "godot": {
+      "type": "stdio",
+      "command": "./target/release/powertool-mcp",
+      "args": []
+    }
+  }
+}
 
 # Or set GODOT_PATH if Godot isn't on your PATH
 GODOT_PATH=/path/to/godot claude mcp add godot -- ./target/release/powertool-mcp
@@ -187,6 +211,14 @@ cargo xtask skill install                    # Claude Code (.claude/skills/)
 cargo xtask skill install --target codex     # Codex CLI (.agents/skills/)
 cargo xtask skill install --target generic   # Plain (skills/)
 ```
+
+Cursor setup writes a project rule at `.cursor/rules/godot-powertool.mdc`
+that references this knowledge base, and writes MCP configuration to
+`.cursor/mcp.json`.
+
+Codex and Cursor setup copy `agent_templates/AGENTS.md` to the project root
+when no `AGENTS.md` exists. Claude Code setup copies
+`agent_templates/CLAUDE.md` as a placeholder for Claude-specific guidance.
 
 ## Rust GDExtension (Optional)
 

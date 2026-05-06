@@ -36,18 +36,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// First-time project setup — downloads Godot, assets, and configures all tooling
+    /// First-time project setup — downloads Godot, assets, and configures all
+    /// tooling
     Init {
         /// Godot version to download (overrides template.toml)
         #[arg(long)]
         godot_version: Option<String>,
 
-        /// Skill install target: claude, codex, generic, or a custom path
-        #[arg(long, default_value = "claude")]
-        skill_target: String,
+        /// Agent to configure: claude, codex, cursor, or none. Prompts when
+        /// omitted.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Override where skill files are installed: claude, codex, generic, or
+        /// a custom path
+        #[arg(long)]
+        skill_target: Option<String>,
     },
 
-    /// Re-setup tooling — Godot (version-aware), extension, import, docs, skill, MCP
+    /// Re-setup tooling — Godot (version-aware), extension, import, docs,
+    /// skill, MCP
     Setup {
         /// Godot version to download (overrides template.toml)
         #[arg(long)]
@@ -69,7 +77,7 @@ enum Commands {
         #[arg(long)]
         skip_mcp: bool,
 
-        /// Skip auto-registering the MCP server with Claude Code (`claude mcp add`)
+        /// Skip auto-registering the MCP server with the selected agent
         #[arg(long)]
         skip_mcp_add: bool,
 
@@ -77,13 +85,19 @@ enum Commands {
         #[arg(long)]
         skip_lsp: bool,
 
-        /// Skip auto-installing the LSP bridge config for Claude Code
+        /// Skip auto-installing selected-agent editor config
         #[arg(long)]
         skip_lsp_install: bool,
 
-        /// Skill install target: claude, codex, generic, or a custom path
-        #[arg(long, default_value = "claude")]
-        skill_target: String,
+        /// Agent to configure: claude, codex, cursor, or none. Prompts when
+        /// omitted.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Override where skill files are installed: claude, codex, generic, or
+        /// a custom path
+        #[arg(long)]
+        skill_target: Option<String>,
     },
 
     /// Re-fetch assets declared in template.toml (e.g. the GUT addon zip).
@@ -92,7 +106,8 @@ enum Commands {
     /// Sync managed paths from the upstream powertool repo per .powertool.toml.
     /// On first run in a project that lacks a manifest, use --bootstrap.
     Update {
-        /// Override the pinned ref for this run; persisted to [source].ref on success.
+        /// Override the pinned ref for this run; persisted to [source].ref on
+        /// success.
         #[arg(long = "ref")]
         git_ref: Option<String>,
 
@@ -126,7 +141,8 @@ enum Commands {
         web: bool,
 
         /// Build only the single-threaded WASM variant (implies --web).
-        /// Use when targeting environments without SharedArrayBuffer / COOP+COEP.
+        /// Use when targeting environments without SharedArrayBuffer /
+        /// COOP+COEP.
         #[arg(long, conflicts_with = "both")]
         nothreads: bool,
 
@@ -312,7 +328,7 @@ enum McpCommands {
 
     /// Print MCP configuration for various clients
     Install {
-        /// Client to generate config for: claude, cursor, cline
+        /// Client to generate config for: claude, codex, cursor, cline
         #[arg(default_value = "claude")]
         client: String,
     },
@@ -337,12 +353,18 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Init {
             godot_version,
+            agent,
             skill_target,
         } => {
             let config = load_template_config(&project_root()?)?;
             let godot_v = godot_version.unwrap_or(config.godot.clone());
-            cmd_init(&godot_v, &skill_target, &config.assets)
-        },
+            cmd_init(
+                &godot_v,
+                agent.as_deref(),
+                skill_target.as_deref(),
+                &config.assets,
+            )
+        }
         Commands::Setup {
             godot_version,
             skip_godot,
@@ -352,6 +374,7 @@ fn main() -> Result<()> {
             skip_mcp_add,
             skip_lsp,
             skip_lsp_install,
+            agent,
             skill_target,
         } => {
             let config = load_template_config(&project_root()?)?;
@@ -365,13 +388,14 @@ fn main() -> Result<()> {
                 skip_mcp_add,
                 skip_lsp,
                 skip_lsp_install,
+                agent,
                 skill_target,
             })
-        },
+        }
         Commands::Assets => {
             let config = load_template_config(&project_root()?)?;
             cmd_update(&config.assets)
-        },
+        }
         Commands::Update {
             git_ref,
             check,
@@ -412,7 +436,7 @@ fn main() -> Result<()> {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "xtask", &mut io::stdout());
             Ok(())
-        },
+        }
         Commands::Web(web_cmd) => match web_cmd {
             WebCommands::Setup => cmd_web_setup(),
             WebCommands::Dev { port } => cmd_web_dev(port),
@@ -570,7 +594,53 @@ struct SetupOptions {
     skip_mcp_add: bool,
     skip_lsp: bool,
     skip_lsp_install: bool,
-    skill_target: String,
+    agent: Option<String>,
+    skill_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentTarget {
+    ClaudeCode,
+    Codex,
+    Cursor,
+    Skip,
+}
+
+impl AgentTarget {
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "claude" | "claude-code" | "claude_code" => Some(Self::ClaudeCode),
+            "codex" | "codex-cli" | "codex_cli" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
+            "none" | "skip" | "no" => Some(Self::Skip),
+            _ => None,
+        }
+    }
+
+    fn skill_target(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("claude"),
+            Self::Codex => Some("codex"),
+            Self::Cursor | Self::Skip => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex CLI",
+            Self::Cursor => "Cursor",
+            Self::Skip => "Skip agent setup",
+        }
+    }
+
+    fn instruction_files(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeCode => &["CLAUDE.md"],
+            Self::Codex | Self::Cursor => &["AGENTS.md"],
+            Self::Skip => &[],
+        }
+    }
 }
 
 // =============================================================================
@@ -585,7 +655,8 @@ fn confirm_prompt(message: &str) -> Result<bool> {
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
-/// Prompt the user for y/n/s. Returns the lowercase char. Loops on invalid input.
+/// Prompt the user for y/n/s. Returns the lowercase char. Loops on invalid
+/// input.
 fn confirm_prompt_yns(message: &str) -> Result<char> {
     loop {
         eprint!("{message} [y/n/s]: ");
@@ -594,6 +665,39 @@ fn confirm_prompt_yns(message: &str) -> Result<char> {
         match input.trim().to_ascii_lowercase().chars().next() {
             Some(c @ ('y' | 'n' | 's')) => return Ok(c),
             _ => eprintln!("Please enter y, n, or s."),
+        }
+    }
+}
+
+fn prompt_agent_target(configured: Option<&str>) -> Result<AgentTarget> {
+    if let Some(value) = configured {
+        return AgentTarget::from_str(value).with_context(|| {
+            format!("Unknown agent target `{value}`. Expected claude, codex, cursor, or none.")
+        });
+    }
+
+    println!("Select an AI assistant to configure:");
+    println!("  1) Claude Code");
+    println!("  2) Codex CLI");
+    println!("  3) Cursor");
+    println!("  s) Skip agent setup");
+
+    loop {
+        eprint!("Agent [1]: ");
+        let mut input = String::new();
+        io::stdin().lock().read_line(&mut input)?;
+        let trimmed = input.trim();
+        match trimmed {
+            "" | "1" => return Ok(AgentTarget::ClaudeCode),
+            "2" => return Ok(AgentTarget::Codex),
+            "3" => return Ok(AgentTarget::Cursor),
+            "s" | "S" => return Ok(AgentTarget::Skip),
+            other => {
+                if let Some(target) = AgentTarget::from_str(other) {
+                    return Ok(target);
+                }
+                eprintln!("Please enter 1, 2, 3, s, or a target name.");
+            }
         }
     }
 }
@@ -708,12 +812,16 @@ fn download_zip(url: &str) -> Result<Vec<u8>> {
 }
 
 // =============================================================================
-// Claude Code integration helpers
+// Agent integration helpers
 // =============================================================================
 
 /// True if the Claude Code CLI is on PATH.
 fn claude_code_detected() -> bool {
     which::which("claude").is_ok()
+}
+
+fn codex_detected() -> bool {
+    which::which("codex").is_ok()
 }
 
 /// Register the MCP server with Claude Code via `claude mcp add`. Idempotent —
@@ -741,9 +849,160 @@ fn try_register_mcp_with_claude(mcp_bin: &Path) -> Result<bool> {
         .context("Failed to invoke `claude mcp add`")?;
 
     if !status.success() {
-        bail!("`claude mcp add godot -- {mcp_path}` exited with {:?}", status.code());
+        bail!(
+            "`claude mcp add godot -- {mcp_path}` exited with {:?}",
+            status.code()
+        );
     }
     Ok(true)
+}
+
+fn try_register_mcp_with_codex(mcp_bin: &Path) -> Result<bool> {
+    if !codex_detected() {
+        return Ok(false);
+    }
+    let mcp_path = mcp_bin.to_string_lossy();
+
+    let _ = Command::new("codex")
+        .args(["mcp", "remove", "godot"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let status = Command::new("codex")
+        .args(["mcp", "add", "godot", "--", &mcp_path])
+        .status()
+        .context("Failed to invoke `codex mcp add`")?;
+
+    if !status.success() {
+        bail!(
+            "`codex mcp add godot -- {mcp_path}` exited with {:?}",
+            status.code()
+        );
+    }
+    Ok(true)
+}
+
+fn install_mcp_for_cursor(mcp_bin: &Path) -> Result<bool> {
+    let root = project_root()?;
+    let cursor_dir = root.join(".cursor");
+    let settings_path = cursor_dir.join("mcp.json");
+    let mcp_path = mcp_bin.to_string_lossy();
+
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let contents =
+            fs::read_to_string(&settings_path).context("Failed to read .cursor/mcp.json")?;
+        serde_json::from_str(&contents).context("Failed to parse .cursor/mcp.json")?
+    } else {
+        serde_json::json!({})
+    };
+
+    let obj = settings
+        .as_object_mut()
+        .context(".cursor/mcp.json is not an object")?;
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    servers
+        .as_object_mut()
+        .context("mcpServers is not an object")?
+        .insert(
+            "godot".to_string(),
+            serde_json::json!({
+                "type": "stdio",
+                "command": mcp_path,
+                "args": []
+            }),
+        );
+
+    fs::create_dir_all(&cursor_dir).context("Failed to create .cursor directory")?;
+    let formatted =
+        serde_json::to_string_pretty(&settings).context("Failed to serialize .cursor/mcp.json")?;
+    fs::write(&settings_path, formatted + "\n").context("Failed to write .cursor/mcp.json")?;
+    println!("Wrote Cursor MCP config to {}", settings_path.display());
+    Ok(true)
+}
+
+fn try_register_mcp_for_agent(agent: AgentTarget, mcp_bin: &Path) -> Result<bool> {
+    match agent {
+        AgentTarget::ClaudeCode => try_register_mcp_with_claude(mcp_bin),
+        AgentTarget::Codex => try_register_mcp_with_codex(mcp_bin),
+        AgentTarget::Cursor => install_mcp_for_cursor(mcp_bin),
+        AgentTarget::Skip => Ok(false),
+    }
+}
+
+fn install_cursor_rules() -> Result<()> {
+    let root = project_root()?;
+    let rules_dir = root.join(".cursor").join("rules");
+    let rule_path = rules_dir.join("godot-powertool.mdc");
+    fs::create_dir_all(&rules_dir).context("Failed to create .cursor/rules directory")?;
+
+    let content = r#"---
+description: Godot PowerTool project guidance
+globs: **/*.gd, **/*.tscn, **/*.tres, **/*.gdextension, Cargo.toml
+alwaysApply: false
+---
+
+Use the Godot PowerTool MCP server for live editor operations, scene inspection, screenshots, and Godot-aware project actions when available.
+
+For Godot and GDScript work, load the project knowledge base before making broad changes:
+
+@skill/SKILL.md
+@skill/gdscript.md
+@skill/quirks.md
+@skill/gdextension.md
+
+Prefer existing scene resources and editor-backed changes over rebuilding scenes procedurally in scripts. Validate GDScript with the project tooling when edits touch runtime behavior.
+"#;
+
+    fs::write(&rule_path, content).context("Failed to write Cursor rule")?;
+    println!("Wrote Cursor project rule to {}", rule_path.display());
+    Ok(())
+}
+
+fn install_agent_editor_config(agent: AgentTarget) -> Result<()> {
+    match agent {
+        AgentTarget::ClaudeCode => {
+            if claude_code_detected() {
+                cmd_lsp_bridge_install("claude")
+            } else {
+                println!("Claude Code CLI not found on PATH — skipping LSP auto-install.");
+                Ok(())
+            }
+        }
+        AgentTarget::Cursor => install_cursor_rules(),
+        AgentTarget::Codex | AgentTarget::Skip => Ok(()),
+    }
+}
+
+fn print_mcp_retry(agent: AgentTarget, mcp_bin: &Path) {
+    match agent {
+        AgentTarget::ClaudeCode => println!(
+            "  claude mcp add godot -- {}  # Register MCP server with Claude Code",
+            mcp_bin.display()
+        ),
+        AgentTarget::Codex => println!(
+            "  codex mcp add godot -- {}  # Register MCP server with Codex CLI",
+            mcp_bin.display()
+        ),
+        AgentTarget::Cursor => {
+            println!("  cargo xtask mcp install cursor  # Print Cursor MCP config");
+        }
+        AgentTarget::Skip => {}
+    }
+}
+
+fn print_lsp_retry(agent: AgentTarget) {
+    match agent {
+        AgentTarget::ClaudeCode => {
+            println!("  cargo xtask lsp-bridge install claude  # Configure GDScript LSP");
+        }
+        AgentTarget::Cursor => {
+            println!("  Re-run `cargo xtask setup --agent cursor` to regenerate Cursor rules");
+        }
+        AgentTarget::Codex | AgentTarget::Skip => {}
+    }
 }
 
 // =============================================================================
@@ -752,7 +1011,8 @@ fn try_register_mcp_with_claude(mcp_bin: &Path) -> Result<bool> {
 
 fn cmd_init(
     godot_version: &str,
-    skill_target: &str,
+    agent: Option<&str>,
+    skill_target_override: Option<&str>,
     assets: &[powertool_common::config::Asset],
 ) -> Result<()> {
     println!("=== First-time project setup ===\n");
@@ -763,6 +1023,8 @@ fn cmd_init(
         println!("Aborted.");
         return Ok(());
     }
+    let agent_target = prompt_agent_target(agent)?;
+    println!("Configuring agent target: {}\n", agent_target.label());
 
     let root = project_root()?;
     let tools = tools_dir()?;
@@ -817,7 +1079,14 @@ fn cmd_init(
     // --- 5. Generate API docs ---
     println!("\n=== Generating Godot API docs ===\n");
     let status = Command::new("cargo")
-        .args(["run", "-p", "powertool-godot-docs", "--release", "--", "generate"])
+        .args([
+            "run",
+            "-p",
+            "powertool-godot-docs",
+            "--release",
+            "--",
+            "generate",
+        ])
         .current_dir(&root)
         .status()
         .context("Failed to run doc generator")?;
@@ -827,17 +1096,31 @@ fn cmd_init(
         eprintln!("  cargo run -p powertool-godot-docs -- generate");
     }
 
-    // --- 6. Install skill files ---
-    println!("\n=== Installing skill files ===\n");
-    match cmd_skill_install(skill_target) {
-        Ok(()) => {},
-        Err(e) => {
-            eprintln!("Warning: Skill install failed: {e}");
-            eprintln!("  You can retry with: cargo xtask skill install");
-        }
+    // --- 6. Install agent instruction files ---
+    if let Err(e) = install_agent_instruction_files(agent_target) {
+        eprintln!("Warning: agent instruction file install failed: {e}");
     }
 
-    // --- 7. Build MCP server ---
+    // --- 7. Install skill files ---
+    let skill_target = skill_target_override.or_else(|| agent_target.skill_target());
+    if let Some(skill_target) = skill_target {
+        println!("\n=== Installing skill files ===\n");
+        match cmd_skill_install(skill_target) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Warning: Skill install failed: {e}");
+                eprintln!(
+                    "  You can retry with: cargo xtask skill install --target {skill_target}"
+                );
+            }
+        }
+    } else if agent_target == AgentTarget::Cursor {
+        println!("\nCursor uses project rules instead of skill files.");
+    } else {
+        println!("\nSkipping skill install.");
+    }
+
+    // --- 8. Build MCP server ---
     println!("\n=== Building MCP server ===\n");
     let status = Command::new("cargo")
         .args(["build", "-p", "powertool-mcp", "--release"])
@@ -854,29 +1137,26 @@ fn cmd_init(
         eprintln!("  cargo build -p powertool-mcp --release");
     }
 
-    // --- 7b. Register MCP with Claude Code (auto, if detected) ---
+    // --- 8b. Register MCP with the selected agent ---
     let mut mcp_registered = false;
     if mcp_built {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
-        match try_register_mcp_with_claude(&mcp_bin) {
+        match try_register_mcp_for_agent(agent_target, &mcp_bin) {
             Ok(true) => {
-                println!("Registered MCP server with Claude Code (`claude mcp add godot`)");
+                println!("Registered MCP server with {}", agent_target.label());
                 mcp_registered = true;
-            },
+            }
             Ok(false) => {
-                println!("Claude Code CLI not found on PATH — skipping `claude mcp add`.");
-            },
+                println!("Could not auto-register MCP for {}.", agent_target.label());
+            }
             Err(e) => {
-                eprintln!("Warning: auto-registering MCP with Claude Code failed: {e}");
-                eprintln!(
-                    "  You can retry with: claude mcp add godot -- {}",
-                    mcp_bin.display()
-                );
-            },
+                eprintln!("Warning: auto-registering MCP failed: {e}");
+                print_mcp_retry(agent_target, &mcp_bin);
+            }
         }
     }
 
-    // --- 8. Build LSP bridge ---
+    // --- 9. Build LSP bridge ---
     println!("\n=== Building LSP bridge ===\n");
     let status = Command::new("cargo")
         .args(["build", "-p", "powertool-lsp-bridge", "--release"])
@@ -886,22 +1166,25 @@ fn cmd_init(
 
     let lsp_built = status.success();
     if lsp_built {
-        let lsp_bin = root.join("target").join("release").join("powertool-lsp-bridge");
+        let lsp_bin = root
+            .join("target")
+            .join("release")
+            .join("powertool-lsp-bridge");
         println!("LSP bridge built: {}", lsp_bin.display());
     } else {
         eprintln!("Warning: LSP bridge build failed. You can retry with:");
         eprintln!("  cargo build -p powertool-lsp-bridge --release");
     }
 
-    // --- 8b. Install LSP config for Claude Code (auto, if detected) ---
+    // --- 9b. Install agent-specific LSP/rules config ---
     let mut lsp_installed = false;
-    if lsp_built && claude_code_detected() {
-        match cmd_lsp_bridge_install("claude") {
+    if lsp_built {
+        match install_agent_editor_config(agent_target) {
             Ok(()) => lsp_installed = true,
             Err(e) => {
-                eprintln!("Warning: LSP bridge install failed: {e}");
-                eprintln!("  You can retry with: cargo xtask lsp-bridge install");
-            },
+                eprintln!("Warning: editor config install failed: {e}");
+                print_lsp_retry(agent_target);
+            }
         }
     }
 
@@ -913,13 +1196,10 @@ fn cmd_init(
 
     if mcp_built && !mcp_registered {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
-        println!(
-            "  claude mcp add godot -- {}  # Register MCP server with Claude Code",
-            mcp_bin.display()
-        );
+        print_mcp_retry(agent_target, &mcp_bin);
     }
     if lsp_built && !lsp_installed {
-        println!("  cargo xtask lsp-bridge install  # Configure GDScript LSP");
+        print_lsp_retry(agent_target);
     }
 
     Ok(())
@@ -927,6 +1207,8 @@ fn cmd_init(
 
 fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     println!("Setting up project tooling...\n");
+    let agent_target = prompt_agent_target(opts.agent.as_deref())?;
+    println!("Configuring agent target: {}\n", agent_target.label());
 
     let root = project_root()?;
     let tools = tools_dir()?;
@@ -968,7 +1250,14 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     if !opts.skip_docs {
         println!("\n=== Generating Godot API docs ===\n");
         let status = Command::new("cargo")
-            .args(["run", "-p", "powertool-godot-docs", "--release", "--", "generate"])
+            .args([
+                "run",
+                "-p",
+                "powertool-godot-docs",
+                "--release",
+                "--",
+                "generate",
+            ])
             .current_dir(&root)
             .status()
             .context("Failed to run doc generator")?;
@@ -981,21 +1270,38 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         println!("\nSkipping API doc generation (--skip-docs)");
     }
 
-    // --- 5. Install skill files ---
+    // --- 5. Install agent instruction files ---
+    if let Err(e) = install_agent_instruction_files(agent_target) {
+        eprintln!("Warning: agent instruction file install failed: {e}");
+    }
+
+    // --- 6. Install skill files ---
     if !opts.skip_skill {
-        println!("\n=== Installing skill files ===\n");
-        match cmd_skill_install(&opts.skill_target) {
-            Ok(()) => {},
-            Err(e) => {
-                eprintln!("Warning: Skill install failed: {e}");
-                eprintln!("  You can retry with: cargo xtask skill install");
+        let skill_target = opts
+            .skill_target
+            .as_deref()
+            .or_else(|| agent_target.skill_target());
+        if let Some(skill_target) = skill_target {
+            println!("\n=== Installing skill files ===\n");
+            match cmd_skill_install(skill_target) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("Warning: Skill install failed: {e}");
+                    eprintln!(
+                        "  You can retry with: cargo xtask skill install --target {skill_target}"
+                    );
+                }
             }
+        } else if agent_target == AgentTarget::Cursor {
+            println!("\nCursor uses project rules instead of skill files.");
+        } else {
+            println!("\nSkipping skill install.");
         }
     } else {
         println!("\nSkipping skill install (--skip-skill)");
     }
 
-    // --- 6. Build MCP server ---
+    // --- 7. Build MCP server ---
     let mut mcp_built = false;
     if !opts.skip_mcp {
         println!("\n=== Building MCP server ===\n");
@@ -1017,31 +1323,28 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         println!("\nSkipping MCP server build (--skip-mcp)");
     }
 
-    // --- 6b. Register MCP with Claude Code (auto, if detected) ---
+    // --- 7b. Register MCP with the selected agent ---
     let mut mcp_registered = false;
     if mcp_built && !opts.skip_mcp_add {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
-        match try_register_mcp_with_claude(&mcp_bin) {
+        match try_register_mcp_for_agent(agent_target, &mcp_bin) {
             Ok(true) => {
-                println!("Registered MCP server with Claude Code (`claude mcp add godot`)");
+                println!("Registered MCP server with {}", agent_target.label());
                 mcp_registered = true;
-            },
+            }
             Ok(false) => {
-                println!("Claude Code CLI not found on PATH — skipping `claude mcp add`.");
-            },
+                println!("Could not auto-register MCP for {}.", agent_target.label());
+            }
             Err(e) => {
-                eprintln!("Warning: auto-registering MCP with Claude Code failed: {e}");
-                eprintln!(
-                    "  You can retry with: claude mcp add godot -- {}",
-                    mcp_bin.display()
-                );
-            },
+                eprintln!("Warning: auto-registering MCP failed: {e}");
+                print_mcp_retry(agent_target, &mcp_bin);
+            }
         }
     } else if mcp_built && opts.skip_mcp_add {
-        println!("Skipping `claude mcp add` (--skip-mcp-add)");
+        println!("Skipping MCP auto-registration (--skip-mcp-add)");
     }
 
-    // --- 7. Build LSP bridge ---
+    // --- 8. Build LSP bridge ---
     let mut lsp_built = false;
     if !opts.skip_lsp {
         println!("\n=== Building LSP bridge ===\n");
@@ -1052,7 +1355,10 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
             .context("Failed to build LSP bridge")?;
 
         if status.success() {
-            let lsp_bin = root.join("target").join("release").join("powertool-lsp-bridge");
+            let lsp_bin = root
+                .join("target")
+                .join("release")
+                .join("powertool-lsp-bridge");
             println!("LSP bridge built: {}", lsp_bin.display());
             lsp_built = true;
         } else {
@@ -1063,22 +1369,18 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
         println!("\nSkipping LSP bridge build (--skip-lsp)");
     }
 
-    // --- 7b. Install LSP config for Claude Code (auto, if detected) ---
+    // --- 8b. Install agent-specific LSP/rules config ---
     let mut lsp_installed = false;
     if lsp_built && !opts.skip_lsp_install {
-        if claude_code_detected() {
-            match cmd_lsp_bridge_install("claude") {
-                Ok(()) => lsp_installed = true,
-                Err(e) => {
-                    eprintln!("Warning: LSP bridge install failed: {e}");
-                    eprintln!("  You can retry with: cargo xtask lsp-bridge install");
-                },
+        match install_agent_editor_config(agent_target) {
+            Ok(()) => lsp_installed = true,
+            Err(e) => {
+                eprintln!("Warning: editor config install failed: {e}");
+                print_lsp_retry(agent_target);
             }
-        } else {
-            println!("Claude Code CLI not found on PATH — skipping LSP auto-install.");
         }
     } else if lsp_built && opts.skip_lsp_install {
-        println!("Skipping LSP auto-install (--skip-lsp-install)");
+        println!("Skipping editor config auto-install (--skip-lsp-install)");
     }
 
     // --- Done ---
@@ -1089,13 +1391,10 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
 
     if mcp_built && !mcp_registered {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
-        println!(
-            "  claude mcp add godot -- {}  # Register MCP server with Claude Code",
-            mcp_bin.display()
-        );
+        print_mcp_retry(agent_target, &mcp_bin);
     }
     if lsp_built && !lsp_installed {
-        println!("  cargo xtask lsp-bridge install  # Configure GDScript LSP");
+        print_lsp_retry(agent_target);
     }
 
     Ok(())
@@ -1143,7 +1442,10 @@ fn cmd_update(assets: &[powertool_common::config::Asset]) -> Result<()> {
             let count = extract_zip_to(&mut archive, &dest, false, strip)?;
             println!("Extracted {count} files");
         } else {
-            println!("{total_files} files, {} conflict(s) with existing files:", conflicts.len());
+            println!(
+                "{total_files} files, {} conflict(s) with existing files:",
+                conflicts.len()
+            );
             for (i, path) in conflicts.iter().enumerate() {
                 if i >= 10 {
                     println!("  ... and {} more", conflicts.len() - 10);
@@ -1152,23 +1454,25 @@ fn cmd_update(assets: &[powertool_common::config::Asset]) -> Result<()> {
                 println!("  {path}");
             }
 
-            let choice = confirm_prompt_yns("Overwrite all (y), cancel (n), or extract only new files (s)?")?;
+            let choice = confirm_prompt_yns(
+                "Overwrite all (y), cancel (n), or extract only new files (s)?",
+            )?;
             match choice {
                 'y' => {
                     let cursor = std::io::Cursor::new(bytes);
                     let mut archive = zip::ZipArchive::new(cursor)?;
                     let count = extract_zip_to(&mut archive, &dest, false, strip)?;
                     println!("Extracted {count} files (overwrote conflicts)");
-                },
+                }
                 's' => {
                     let cursor = std::io::Cursor::new(bytes);
                     let mut archive = zip::ZipArchive::new(cursor)?;
                     let count = extract_zip_to(&mut archive, &dest, true, strip)?;
                     println!("Extracted {count} new files (skipped existing)");
-                },
+                }
                 _ => {
                     println!("Skipped.");
-                },
+                }
             }
         }
     }
@@ -1184,10 +1488,16 @@ fn download_godot(version: &str, tools_dir: &Path) -> Result<()> {
     // Version-aware skip: only skip if the installed version matches
     if let Ok(installed) = fs::read_to_string(&stamp_path) {
         if installed.trim() == version {
-            println!("Godot {version} already installed at {}", godot_dir.display());
+            println!(
+                "Godot {version} already installed at {}",
+                godot_dir.display()
+            );
             return Ok(());
         }
-        println!("Godot version changed ({} -> {version}), re-downloading...", installed.trim());
+        println!(
+            "Godot version changed ({} -> {version}), re-downloading...",
+            installed.trim()
+        );
         fs::remove_dir_all(&godot_dir)?;
     }
 
@@ -1307,10 +1617,8 @@ const WASM_RUSTFLAGS_BASE: &str = concat!(
     "-Z default-visibility=hidden",
 );
 
-const WASM_RUSTFLAGS_THREADS: &str = concat!(
-    "-C link-args=-pthread ",
-    "-C target-feature=+atomics",
-);
+const WASM_RUSTFLAGS_THREADS: &str =
+    concat!("-C link-args=-pthread ", "-C target-feature=+atomics",);
 
 fn cmd_build_wasm(release: bool, nothreads: bool, both: bool, ext: &ExtensionPaths) -> Result<()> {
     // Selection matrix:
@@ -1383,10 +1691,7 @@ fn cmd_build_wasm(release: bool, nothreads: bool, both: bool, ext: &ExtensionPat
         .join("wasm32-unknown-emscripten")
         .join(mode);
 
-    let run_wasm_build = |extra_flags: &str,
-                          extra_args: &[&str],
-                          dest_name: &str|
-     -> Result<()> {
+    let run_wasm_build = |extra_flags: &str, extra_args: &[&str], dest_name: &str| -> Result<()> {
         let rustflags = if extra_flags.is_empty() {
             WASM_RUSTFLAGS_BASE.to_string()
         } else {
@@ -1666,10 +1971,10 @@ fn cmd_doctor() -> Result<()> {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
             println!("\x1b[32m✓\x1b[0m {}", version.trim());
-        },
+        }
         _ => {
             println!("\x1b[33m-\x1b[0m not installed (optional, for WASM builds)");
-        },
+        }
     }
 
     print!("Godot:          ");
@@ -1678,11 +1983,11 @@ fn cmd_doctor() -> Result<()> {
             let output = Command::new(&path).arg("--version").output()?;
             let version = String::from_utf8_lossy(&output.stdout);
             println!("\x1b[32m✓\x1b[0m {} ({})", version.trim(), path.display());
-        },
+        }
         Err(_) => {
             println!("\x1b[31m✗\x1b[0m not found - run 'cargo xtask setup'");
             all_ok = false;
-        },
+        }
     }
 
     print!("GUT:            ");
@@ -1892,7 +2197,7 @@ fn cmd_web_setup() -> Result<()> {
         Ok(_) => {
             let output = Command::new("node").arg("--version").output()?;
             println!("{}", String::from_utf8_lossy(&output.stdout).trim());
-        },
+        }
         Err(_) => println!("NOT FOUND — install from https://nodejs.org/"),
     }
 
@@ -1901,7 +2206,7 @@ fn cmd_web_setup() -> Result<()> {
         Ok(_) => {
             let output = Command::new("npm").arg("--version").output()?;
             println!("{}", String::from_utf8_lossy(&output.stdout).trim());
-        },
+        }
         Err(_) => println!("NOT FOUND"),
     }
 
@@ -1977,9 +2282,7 @@ fn cmd_web_build() -> Result<()> {
     Ok(())
 }
 
-const GODOT_EXPORT_EXTENSIONS: &[&str] = &[
-    "html", "js", "wasm", "pck", "png", "json", "worker.js",
-];
+const GODOT_EXPORT_EXTENSIONS: &[&str] = &["html", "js", "wasm", "pck", "png", "json", "worker.js"];
 
 fn is_godot_export_file(path: &Path, ext: &ExtensionPaths) -> bool {
     let name = path
@@ -2029,7 +2332,7 @@ fn cmd_web_export(release: bool) -> Result<()> {
         Err(e) => {
             println!("Warning: WASM build failed: {e}");
             println!("Continuing with export (GDScript will work, Rust extension will not)...\n");
-        },
+        }
     }
 
     let godot = godot_binary()?;
@@ -2175,11 +2478,11 @@ fn cmd_web_doctor() -> Result<()> {
         Ok(_) => {
             let output = Command::new("node").arg("--version").output()?;
             println!("{}", String::from_utf8_lossy(&output.stdout).trim());
-        },
+        }
         Err(_) => {
             println!("NOT FOUND");
             issues.push("Node.js not installed. Visit https://nodejs.org/");
-        },
+        }
     }
 
     print!("npm: ");
@@ -2187,11 +2490,11 @@ fn cmd_web_doctor() -> Result<()> {
         Ok(_) => {
             let output = Command::new("npm").arg("--version").output()?;
             println!("{}", String::from_utf8_lossy(&output.stdout).trim());
-        },
+        }
         Err(_) => {
             println!("NOT FOUND");
             issues.push("npm not installed");
-        },
+        }
     }
 
     print!("Dependencies: ");
@@ -2212,11 +2515,11 @@ fn cmd_web_doctor() -> Result<()> {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
             println!("{}", version.trim());
-        },
+        }
         _ => {
             println!("NOT INSTALLED");
             issues.push("Run 'cargo xtask web setup' to install Playwright");
-        },
+        }
     }
 
     print!("Game export: ");
@@ -2270,6 +2573,43 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             fs::copy(&src_path, &dst_path)?;
         }
     }
+    Ok(())
+}
+
+fn install_agent_instruction_files(agent: AgentTarget) -> Result<()> {
+    let files = agent.instruction_files();
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    let root = project_root()?;
+    let source_dir = root.join("agent_templates");
+    if !source_dir.exists() {
+        bail!(
+            "Agent instruction template directory not found at {}",
+            source_dir.display()
+        );
+    }
+
+    println!("\n=== Installing agent instruction files ===\n");
+    for file in files {
+        let source = source_dir.join(file);
+        let dest = root.join(file);
+
+        if !source.exists() {
+            bail!("Agent instruction template not found at {}", source.display());
+        }
+        if dest.exists() {
+            println!("Keeping existing {}", dest.display());
+            continue;
+        }
+
+        fs::copy(&source, &dest).with_context(|| {
+            format!("Failed to copy {} -> {}", source.display(), dest.display())
+        })?;
+        println!("Copied {}", dest.display());
+    }
+
     Ok(())
 }
 
@@ -2376,13 +2716,29 @@ fn cmd_mcp_install(client: &str) -> Result<()> {
             println!();
             println!("Or build first: cargo build -p powertool-mcp --release");
         }
+        "codex" => {
+            println!("Add to Codex CLI with:");
+            println!("  codex mcp add godot -- {mcp_path}");
+            println!();
+            println!("Or add to ~/.codex/config.toml:");
+            println!(
+                r#"[mcp_servers.godot]
+command = "{mcp_path}"
+args = []
+enabled = true"#
+            );
+            println!();
+            println!("Build first: cargo build -p powertool-mcp --release");
+        }
         "cursor" => {
             println!("Add to .cursor/mcp.json:");
             println!(
                 r#"{{
   "mcpServers": {{
     "godot": {{
-      "command": "{mcp_path}"
+      "type": "stdio",
+      "command": "{mcp_path}",
+      "args": []
     }}
   }}
 }}"#
@@ -2405,7 +2761,10 @@ fn cmd_mcp_install(client: &str) -> Result<()> {
 
 fn cmd_lsp_bridge_run() -> Result<()> {
     let root = project_root()?;
-    let bin = root.join("target").join("release").join("powertool-lsp-bridge");
+    let bin = root
+        .join("target")
+        .join("release")
+        .join("powertool-lsp-bridge");
 
     if !bin.exists() {
         println!("LSP bridge not built. Building in release mode...");
@@ -2431,7 +2790,10 @@ fn cmd_lsp_bridge_run() -> Result<()> {
 
 fn cmd_lsp_bridge_install(client: &str) -> Result<()> {
     let root = project_root()?;
-    let bin = root.join("target").join("release").join("powertool-lsp-bridge");
+    let bin = root
+        .join("target")
+        .join("release")
+        .join("powertool-lsp-bridge");
     let bin_path = bin.to_string_lossy();
 
     match client {
@@ -2443,8 +2805,7 @@ fn cmd_lsp_bridge_install(client: &str) -> Result<()> {
             let mut settings: serde_json::Value = if settings_path.exists() {
                 let contents = fs::read_to_string(&settings_path)
                     .context("Failed to read .claude/settings.json")?;
-                serde_json::from_str(&contents)
-                    .context("Failed to parse .claude/settings.json")?
+                serde_json::from_str(&contents).context("Failed to parse .claude/settings.json")?
             } else {
                 serde_json::json!({})
             };
@@ -2461,7 +2822,9 @@ fn cmd_lsp_bridge_install(client: &str) -> Result<()> {
             });
 
             // Merge into settings.lspServers.gdscript
-            let obj = settings.as_object_mut().context("settings.json is not an object")?;
+            let obj = settings
+                .as_object_mut()
+                .context("settings.json is not an object")?;
             let lsp_servers = obj
                 .entry("lspServers")
                 .or_insert_with(|| serde_json::json!({}));
@@ -2472,8 +2835,8 @@ fn cmd_lsp_bridge_install(client: &str) -> Result<()> {
 
             // Ensure .claude/ directory exists and write
             fs::create_dir_all(&claude_dir).context("Failed to create .claude directory")?;
-            let formatted = serde_json::to_string_pretty(&settings)
-                .context("Failed to serialize settings")?;
+            let formatted =
+                serde_json::to_string_pretty(&settings).context("Failed to serialize settings")?;
             fs::write(&settings_path, formatted + "\n")
                 .context("Failed to write .claude/settings.json")?;
 
