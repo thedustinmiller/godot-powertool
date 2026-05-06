@@ -8,7 +8,7 @@ Unified template, Rust GDExtension, docs tool, and MCP/Skill bundle.
 # Setup; download Godot and GUT testing addon
 cargo xtask setup
 # or pick explicitly instead of using the setup prompt
-cargo xtask setup --agent codex
+cargo xtask setup --agent 7
 
 # Open Godot editor
 cargo xtask editor
@@ -64,7 +64,9 @@ docs = "4.6.2"
 
 ```bash
 cargo xtask setup              # Download Godot + GUT, initialize project, prompt for agent setup
-cargo xtask setup --agent cursor  # Configure Cursor instead of prompting
+cargo xtask setup --agent 7       # Configure Claude Code + Codex CLI + Cursor
+cargo xtask setup --agent 3       # Configure Claude Code + Codex CLI
+cargo xtask setup --agent cursor  # Configure only Cursor instead of prompting
 cargo xtask build              # Build Rust GDExtension (if enabled)
 cargo xtask run                # Run the game
 cargo xtask editor             # Open Godot editor

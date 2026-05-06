@@ -14,17 +14,25 @@ pub(crate) enum AgentTarget {
     ClaudeCode,
     Codex,
     Cursor,
-    Skip,
 }
 
 impl AgentTarget {
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "claude" | "claude-code" | "claude_code" => Some(Self::ClaudeCode),
-            "codex" | "codex-cli" | "codex_cli" => Some(Self::Codex),
+            "cc" | "claude" | "claude-code" | "claude_code" | "claude code" => {
+                Some(Self::ClaudeCode)
+            }
+            "codex" | "codex-cli" | "codex_cli" | "codex cli" => Some(Self::Codex),
             "cursor" => Some(Self::Cursor),
-            "none" | "skip" | "no" => Some(Self::Skip),
             _ => None,
+        }
+    }
+
+    fn bit(self) -> u8 {
+        match self {
+            Self::ClaudeCode => 1,
+            Self::Codex => 2,
+            Self::Cursor => 4,
         }
     }
 
@@ -32,7 +40,7 @@ impl AgentTarget {
         match self {
             Self::ClaudeCode => Some("claude"),
             Self::Codex => Some("codex"),
-            Self::Cursor | Self::Skip => None,
+            Self::Cursor => None,
         }
     }
 
@@ -41,7 +49,6 @@ impl AgentTarget {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor",
-            Self::Skip => "Skip agent setup",
         }
     }
 
@@ -49,40 +56,122 @@ impl AgentTarget {
         match self {
             Self::ClaudeCode => &["CLAUDE.md"],
             Self::Codex | Self::Cursor => &["AGENTS.md"],
-            Self::Skip => &[],
         }
     }
 }
 
-pub(crate) fn prompt_agent_target(configured: Option<&str>) -> Result<AgentTarget> {
-    if let Some(value) = configured {
-        return AgentTarget::from_str(value).with_context(|| {
-            format!("Unknown agent target `{value}`. Expected claude, codex, cursor, or none.")
-        });
+const AGENTS_IN_ORDER: [AgentTarget; 3] = [
+    AgentTarget::ClaudeCode,
+    AgentTarget::Codex,
+    AgentTarget::Cursor,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AgentSelection {
+    bits: u8,
+}
+
+impl AgentSelection {
+    pub(crate) const NONE: Self = Self { bits: 0 };
+
+    fn from_bits(bits: u8) -> Option<Self> {
+        if bits <= 7 { Some(Self { bits }) } else { None }
     }
 
-    println!("Select an AI assistant to configure:");
+    fn from_target(target: AgentTarget) -> Self {
+        Self { bits: target.bit() }
+    }
+
+    pub(crate) fn contains(self, target: AgentTarget) -> bool {
+        self.bits & target.bit() != 0
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self.bits == 0
+    }
+
+    pub(crate) fn iter(self) -> impl Iterator<Item = AgentTarget> {
+        AGENTS_IN_ORDER
+            .into_iter()
+            .filter(move |a| self.contains(*a))
+    }
+
+    pub(crate) fn label(self) -> String {
+        if self.is_empty() {
+            return "Skip agent setup".to_string();
+        }
+        self.iter()
+            .map(AgentTarget::label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub(crate) fn skill_targets(self) -> impl Iterator<Item = &'static str> {
+        self.iter().filter_map(AgentTarget::skill_target)
+    }
+}
+
+impl std::str::FromStr for AgentSelection {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Ok(Self::from_target(AgentTarget::ClaudeCode));
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if matches!(lower.as_str(), "none" | "skip" | "no" | "0") {
+            return Ok(Self::NONE);
+        }
+        if matches!(lower.as_str(), "all") {
+            return Ok(Self { bits: 7 });
+        }
+        if let Ok(bits) = lower.parse::<u8>() {
+            return Self::from_bits(bits)
+                .with_context(|| format!("Agent bitmask `{bits}` is out of range. Use 0-7."));
+        }
+
+        let mut bits = 0;
+        for part in lower
+            .split([',', '+', '|'])
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            let target = AgentTarget::from_str(part).with_context(|| {
+                format!(
+                    "Unknown agent target `{part}`. Expected claude, codex, cursor, all, none, or bitmask 0-7."
+                )
+            })?;
+            bits |= target.bit();
+        }
+
+        Ok(Self { bits })
+    }
+}
+
+pub(crate) fn prompt_agent_selection(configured: Option<&str>) -> Result<AgentSelection> {
+    if let Some(value) = configured {
+        return value.parse();
+    }
+
+    println!("Select AI assistants to configure:");
     println!("  1) Claude Code");
     println!("  2) Codex CLI");
-    println!("  3) Cursor");
-    println!("  s) Skip agent setup");
+    println!("  4) Cursor");
+    println!(
+        "Use sums to select multiple: 3 = Claude Code + Codex CLI, 5 = Claude Code + Cursor, 7 = all."
+    );
+    println!("  0) Skip agent setup");
 
     loop {
-        eprint!("Agent [1]: ");
+        eprint!("Agents [1]: ");
         let mut input = String::new();
         io::stdin().lock().read_line(&mut input)?;
         let trimmed = input.trim();
-        match trimmed {
-            "" | "1" => return Ok(AgentTarget::ClaudeCode),
-            "2" => return Ok(AgentTarget::Codex),
-            "3" => return Ok(AgentTarget::Cursor),
-            "s" | "S" => return Ok(AgentTarget::Skip),
-            other => {
-                if let Some(target) = AgentTarget::from_str(other) {
-                    return Ok(target);
-                }
-                eprintln!("Please enter 1, 2, 3, s, or a target name.");
-            }
+        let value = if trimmed.is_empty() { "1" } else { trimmed };
+        match value.parse() {
+            Ok(selection) => return Ok(selection),
+            Err(e) => eprintln!("{e}"),
         }
     }
 }
@@ -191,8 +280,33 @@ pub(crate) fn try_register_mcp_for_agent(agent: AgentTarget, mcp_bin: &Path) -> 
         AgentTarget::ClaudeCode => try_register_mcp_with_claude(mcp_bin),
         AgentTarget::Codex => try_register_mcp_with_codex(mcp_bin),
         AgentTarget::Cursor => install_mcp_for_cursor(&project_root()?, mcp_bin),
-        AgentTarget::Skip => Ok(false),
     }
+}
+
+pub(crate) fn try_register_mcp_for_agents(
+    selection: AgentSelection,
+    mcp_bin: &Path,
+) -> Result<bool> {
+    let mut registered_any = false;
+    for agent in selection.iter() {
+        match try_register_mcp_for_agent(agent, mcp_bin) {
+            Ok(true) => {
+                println!("Registered MCP server with {}", agent.label());
+                registered_any = true;
+            }
+            Ok(false) => {
+                println!("Could not auto-register MCP for {}.", agent.label());
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: auto-registering MCP for {} failed: {e}",
+                    agent.label()
+                );
+                print_mcp_retry(agent, mcp_bin);
+            }
+        }
+    }
+    Ok(registered_any)
 }
 
 fn install_cursor_rules_at(root: &Path) -> Result<()> {
@@ -234,8 +348,25 @@ pub(crate) fn install_agent_editor_config(agent: AgentTarget) -> Result<()> {
             }
         }
         AgentTarget::Cursor => install_cursor_rules_at(&project_root()?),
-        AgentTarget::Codex | AgentTarget::Skip => Ok(()),
+        AgentTarget::Codex => Ok(()),
     }
+}
+
+pub(crate) fn install_agent_editor_configs(selection: AgentSelection) -> Result<bool> {
+    let mut installed_any = false;
+    for agent in selection.iter() {
+        match install_agent_editor_config(agent) {
+            Ok(()) => installed_any = true,
+            Err(e) => {
+                eprintln!(
+                    "Warning: editor config install for {} failed: {e}",
+                    agent.label()
+                );
+                print_lsp_retry(agent);
+            }
+        }
+    }
+    Ok(installed_any)
 }
 
 pub(crate) fn print_mcp_retry(agent: AgentTarget, mcp_bin: &Path) {
@@ -251,7 +382,6 @@ pub(crate) fn print_mcp_retry(agent: AgentTarget, mcp_bin: &Path) {
         AgentTarget::Cursor => {
             println!("  cargo xtask mcp install cursor  # Print Cursor MCP config");
         }
-        AgentTarget::Skip => {}
     }
 }
 
@@ -263,7 +393,19 @@ pub(crate) fn print_lsp_retry(agent: AgentTarget) {
         AgentTarget::Cursor => {
             println!("  Re-run `cargo xtask setup --agent cursor` to regenerate Cursor rules");
         }
-        AgentTarget::Codex | AgentTarget::Skip => {}
+        AgentTarget::Codex => {}
+    }
+}
+
+pub(crate) fn print_mcp_retries(selection: AgentSelection, mcp_bin: &Path) {
+    for agent in selection.iter() {
+        print_mcp_retry(agent, mcp_bin);
+    }
+}
+
+pub(crate) fn print_lsp_retries(selection: AgentSelection) {
+    for agent in selection.iter() {
+        print_lsp_retry(agent);
     }
 }
 
@@ -292,9 +434,8 @@ fn copy_agent_instruction_files(root: &Path, source_dir: &Path, agent: AgentTarg
     Ok(())
 }
 
-pub(crate) fn install_agent_instruction_files(agent: AgentTarget) -> Result<()> {
-    let files = agent.instruction_files();
-    if files.is_empty() {
+pub(crate) fn install_agent_instruction_files(selection: AgentSelection) -> Result<()> {
+    if selection.is_empty() {
         return Ok(());
     }
 
@@ -308,7 +449,10 @@ pub(crate) fn install_agent_instruction_files(agent: AgentTarget) -> Result<()> 
     }
 
     println!("\n=== Installing agent instruction files ===\n");
-    copy_agent_instruction_files(&root, &source_dir, agent)
+    for agent in selection.iter() {
+        copy_agent_instruction_files(&root, &source_dir, agent)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -334,8 +478,25 @@ mod tests {
         );
         assert_eq!(AgentTarget::from_str("codex_cli"), Some(AgentTarget::Codex));
         assert_eq!(AgentTarget::from_str("cursor"), Some(AgentTarget::Cursor));
-        assert_eq!(AgentTarget::from_str("none"), Some(AgentTarget::Skip));
+        assert_eq!(AgentTarget::from_str("none"), None);
         assert_eq!(AgentTarget::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn parses_agent_selection_bitmasks_and_names() {
+        let cc_codex: AgentSelection = "3".parse().unwrap();
+        assert!(cc_codex.contains(AgentTarget::ClaudeCode));
+        assert!(cc_codex.contains(AgentTarget::Codex));
+        assert!(!cc_codex.contains(AgentTarget::Cursor));
+
+        let cc_cursor: AgentSelection = "claude,cursor".parse().unwrap();
+        assert!(cc_cursor.contains(AgentTarget::ClaudeCode));
+        assert!(!cc_cursor.contains(AgentTarget::Codex));
+        assert!(cc_cursor.contains(AgentTarget::Cursor));
+
+        let all: AgentSelection = "all".parse().unwrap();
+        assert_eq!(all.iter().count(), 3);
+        assert!("8".parse::<AgentSelection>().is_err());
     }
 
     #[test]
@@ -343,7 +504,6 @@ mod tests {
         assert_eq!(AgentTarget::ClaudeCode.instruction_files(), &["CLAUDE.md"]);
         assert_eq!(AgentTarget::Codex.instruction_files(), &["AGENTS.md"]);
         assert_eq!(AgentTarget::Cursor.instruction_files(), &["AGENTS.md"]);
-        assert!(AgentTarget::Skip.instruction_files().is_empty());
     }
 
     #[test]

@@ -18,8 +18,8 @@ mod agent;
 mod update;
 mod web;
 use agent::{
-    AgentTarget, install_agent_editor_config, install_agent_instruction_files, print_lsp_retry,
-    print_mcp_retry, prompt_agent_target, try_register_mcp_for_agent,
+    AgentSelection, AgentTarget, install_agent_editor_configs, install_agent_instruction_files,
+    print_lsp_retries, print_mcp_retries, prompt_agent_selection, try_register_mcp_for_agents,
 };
 use powertool_common::{
     config::{ExtensionConfig, load_template_config},
@@ -49,8 +49,8 @@ enum Commands {
         #[arg(long)]
         godot_version: Option<String>,
 
-        /// Agent to configure: claude, codex, cursor, or none. Prompts when
-        /// omitted.
+        /// Agents to configure: bitmask 0-7, all, claude, codex, cursor, or
+        /// comma-separated names. Prompts when omitted.
         #[arg(long)]
         agent: Option<String>,
 
@@ -83,7 +83,7 @@ enum Commands {
         #[arg(long)]
         skip_mcp: bool,
 
-        /// Skip auto-registering the MCP server with the selected agent
+        /// Skip auto-registering the MCP server with selected agents
         #[arg(long)]
         skip_mcp_add: bool,
 
@@ -91,12 +91,12 @@ enum Commands {
         #[arg(long)]
         skip_lsp: bool,
 
-        /// Skip auto-installing selected-agent editor config
+        /// Skip auto-installing selected-agent editor configs
         #[arg(long)]
         skip_lsp_install: bool,
 
-        /// Agent to configure: claude, codex, cursor, or none. Prompts when
-        /// omitted.
+        /// Agents to configure: bitmask 0-7, all, claude, codex, cursor, or
+        /// comma-separated names. Prompts when omitted.
         #[arg(long)]
         agent: Option<String>,
 
@@ -743,6 +743,39 @@ fn download_zip(url: &str) -> Result<Vec<u8>> {
 // Commands
 // =============================================================================
 
+fn install_skill_files_for_selection(
+    agent_selection: AgentSelection,
+    skill_target_override: Option<&str>,
+) {
+    let skill_targets = if let Some(target) = skill_target_override {
+        vec![target]
+    } else {
+        agent_selection.skill_targets().collect::<Vec<_>>()
+    };
+
+    if skill_targets.is_empty() {
+        if agent_selection.contains(AgentTarget::Cursor) {
+            println!("\nCursor uses project rules instead of skill files.");
+        } else {
+            println!("\nSkipping skill install.");
+        }
+        return;
+    }
+
+    println!("\n=== Installing skill files ===\n");
+    for skill_target in skill_targets {
+        match cmd_skill_install(skill_target) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Warning: Skill install failed: {e}");
+                eprintln!(
+                    "  You can retry with: cargo xtask skill install --target {skill_target}"
+                );
+            }
+        }
+    }
+}
+
 fn cmd_init(
     godot_version: &str,
     agent: Option<&str>,
@@ -757,8 +790,8 @@ fn cmd_init(
         println!("Aborted.");
         return Ok(());
     }
-    let agent_target = prompt_agent_target(agent)?;
-    println!("Configuring agent target: {}\n", agent_target.label());
+    let agent_selection = prompt_agent_selection(agent)?;
+    println!("Configuring agent selection: {}\n", agent_selection.label());
 
     let root = project_root()?;
     let tools = tools_dir()?;
@@ -831,28 +864,12 @@ fn cmd_init(
     }
 
     // --- 6. Install agent instruction files ---
-    if let Err(e) = install_agent_instruction_files(agent_target) {
+    if let Err(e) = install_agent_instruction_files(agent_selection) {
         eprintln!("Warning: agent instruction file install failed: {e}");
     }
 
     // --- 7. Install skill files ---
-    let skill_target = skill_target_override.or_else(|| agent_target.skill_target());
-    if let Some(skill_target) = skill_target {
-        println!("\n=== Installing skill files ===\n");
-        match cmd_skill_install(skill_target) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("Warning: Skill install failed: {e}");
-                eprintln!(
-                    "  You can retry with: cargo xtask skill install --target {skill_target}"
-                );
-            }
-        }
-    } else if agent_target == AgentTarget::Cursor {
-        println!("\nCursor uses project rules instead of skill files.");
-    } else {
-        println!("\nSkipping skill install.");
-    }
+    install_skill_files_for_selection(agent_selection, skill_target_override);
 
     // --- 8. Build MCP server ---
     println!("\n=== Building MCP server ===\n");
@@ -875,19 +892,7 @@ fn cmd_init(
     let mut mcp_registered = false;
     if mcp_built {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
-        match try_register_mcp_for_agent(agent_target, &mcp_bin) {
-            Ok(true) => {
-                println!("Registered MCP server with {}", agent_target.label());
-                mcp_registered = true;
-            }
-            Ok(false) => {
-                println!("Could not auto-register MCP for {}.", agent_target.label());
-            }
-            Err(e) => {
-                eprintln!("Warning: auto-registering MCP failed: {e}");
-                print_mcp_retry(agent_target, &mcp_bin);
-            }
-        }
+        mcp_registered = try_register_mcp_for_agents(agent_selection, &mcp_bin)?;
     }
 
     // --- 9. Build LSP bridge ---
@@ -913,13 +918,7 @@ fn cmd_init(
     // --- 9b. Install agent-specific LSP/rules config ---
     let mut lsp_installed = false;
     if lsp_built {
-        match install_agent_editor_config(agent_target) {
-            Ok(()) => lsp_installed = true,
-            Err(e) => {
-                eprintln!("Warning: editor config install failed: {e}");
-                print_lsp_retry(agent_target);
-            }
-        }
+        lsp_installed = install_agent_editor_configs(agent_selection)?;
     }
 
     // --- Done ---
@@ -930,10 +929,10 @@ fn cmd_init(
 
     if mcp_built && !mcp_registered {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
-        print_mcp_retry(agent_target, &mcp_bin);
+        print_mcp_retries(agent_selection, &mcp_bin);
     }
     if lsp_built && !lsp_installed {
-        print_lsp_retry(agent_target);
+        print_lsp_retries(agent_selection);
     }
 
     Ok(())
@@ -941,8 +940,8 @@ fn cmd_init(
 
 fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     println!("Setting up project tooling...\n");
-    let agent_target = prompt_agent_target(opts.agent.as_deref())?;
-    println!("Configuring agent target: {}\n", agent_target.label());
+    let agent_selection = prompt_agent_selection(opts.agent.as_deref())?;
+    println!("Configuring agent selection: {}\n", agent_selection.label());
 
     let root = project_root()?;
     let tools = tools_dir()?;
@@ -1005,32 +1004,13 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     }
 
     // --- 5. Install agent instruction files ---
-    if let Err(e) = install_agent_instruction_files(agent_target) {
+    if let Err(e) = install_agent_instruction_files(agent_selection) {
         eprintln!("Warning: agent instruction file install failed: {e}");
     }
 
     // --- 6. Install skill files ---
     if !opts.skip_skill {
-        let skill_target = opts
-            .skill_target
-            .as_deref()
-            .or_else(|| agent_target.skill_target());
-        if let Some(skill_target) = skill_target {
-            println!("\n=== Installing skill files ===\n");
-            match cmd_skill_install(skill_target) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Warning: Skill install failed: {e}");
-                    eprintln!(
-                        "  You can retry with: cargo xtask skill install --target {skill_target}"
-                    );
-                }
-            }
-        } else if agent_target == AgentTarget::Cursor {
-            println!("\nCursor uses project rules instead of skill files.");
-        } else {
-            println!("\nSkipping skill install.");
-        }
+        install_skill_files_for_selection(agent_selection, opts.skill_target.as_deref());
     } else {
         println!("\nSkipping skill install (--skip-skill)");
     }
@@ -1061,19 +1041,7 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     let mut mcp_registered = false;
     if mcp_built && !opts.skip_mcp_add {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
-        match try_register_mcp_for_agent(agent_target, &mcp_bin) {
-            Ok(true) => {
-                println!("Registered MCP server with {}", agent_target.label());
-                mcp_registered = true;
-            }
-            Ok(false) => {
-                println!("Could not auto-register MCP for {}.", agent_target.label());
-            }
-            Err(e) => {
-                eprintln!("Warning: auto-registering MCP failed: {e}");
-                print_mcp_retry(agent_target, &mcp_bin);
-            }
-        }
+        mcp_registered = try_register_mcp_for_agents(agent_selection, &mcp_bin)?;
     } else if mcp_built && opts.skip_mcp_add {
         println!("Skipping MCP auto-registration (--skip-mcp-add)");
     }
@@ -1106,13 +1074,7 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
     // --- 8b. Install agent-specific LSP/rules config ---
     let mut lsp_installed = false;
     if lsp_built && !opts.skip_lsp_install {
-        match install_agent_editor_config(agent_target) {
-            Ok(()) => lsp_installed = true,
-            Err(e) => {
-                eprintln!("Warning: editor config install failed: {e}");
-                print_lsp_retry(agent_target);
-            }
-        }
+        lsp_installed = install_agent_editor_configs(agent_selection)?;
     } else if lsp_built && opts.skip_lsp_install {
         println!("Skipping editor config auto-install (--skip-lsp-install)");
     }
@@ -1125,10 +1087,10 @@ fn cmd_setup(opts: &SetupOptions) -> Result<()> {
 
     if mcp_built && !mcp_registered {
         let mcp_bin = root.join("target").join("release").join("powertool-mcp");
-        print_mcp_retry(agent_target, &mcp_bin);
+        print_mcp_retries(agent_selection, &mcp_bin);
     }
     if lsp_built && !lsp_installed {
-        print_lsp_retry(agent_target);
+        print_lsp_retries(agent_selection);
     }
 
     Ok(())
