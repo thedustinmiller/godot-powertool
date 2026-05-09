@@ -64,7 +64,7 @@ If the Godot MCP server is available, use it for all Godot operations:
 
 **Editor mode** (preferred — requires editor running):
 - **Scene tree**: `create_node`, `delete_node`, `update_node_property`, `get_node_properties`, `list_nodes`
-- **Scenes**: `create_scene`, `open_scene`, `save_scene`, `get_current_scene`, `get_scene_structure`
+- **Scenes**: `create_scene`, `open_scene`, `close_scene`, `save_scene`, `reload_scene_from_disk`, `get_current_scene`, `get_scene_structure`
 - **Scripts**: `create_script_editor`, `edit_script_editor`, `get_script_editor` (use for incremental edits; for bulk/greenfield scripts, direct file writes are faster)
 - **Editor**: `get_editor_state`, `get_selected_node`, `execute_editor_script`
 - **Run/Debug**: `run_scene` / `stop_scene`, `take_screenshot` (use `pause_first: true` for CPU-heavy scenes), `get_debug_output`
@@ -74,6 +74,33 @@ If the Godot MCP server is available, use it for all Godot operations:
 - `run_scene_standalone` / `stop_scene_standalone` — run scenes outside the editor
 - `get_debug_output` — captured stdout/stderr from standalone process
 - `create_scene` (headless), `get_godot_version`, `get_project_info`, `list_projects`
+
+## Scene Workflow Rules
+
+The Godot editor keeps an **in-memory copy** of every open scene. If you write
+to a `.tscn` file directly while it is open in the editor, the editor's copy
+diverges from disk and the next `save_scene` will overwrite your file edits.
+The editor also pops up a "scene was modified externally, reload from disk?"
+dialog that blocks further MCP commands until dismissed.
+
+To stay in sync, follow these rules:
+
+1. **After writing to a `.tscn` file with the Edit/Write tools, call
+   `reload_scene_from_disk(path)` if that scene is currently open.** Otherwise
+   the in-editor copy will overwrite your changes on next save and the
+   "reload from disk?" popup will hang the editor.
+2. **Close scenes when you finish a task that opened them.** Use `close_scene`
+   on the active scene tab. Long-lived open scenes are the main source of
+   editor/agent confusion, especially across unrelated tasks.
+3. Prefer the live MCP tools (`update_node_property`, `add_node`, etc.) over
+   direct `.tscn` writes when the editor is running. They go through the
+   editor's data model so no desync is possible. Direct `.tscn` writes are
+   for headless mode or bulk edits the live tools can't express.
+
+If the MCP server starts prepending an `⚠️ WARNING: N Godot processes match…`
+banner to its responses, **stop and resolve the duplicates first**. Multiple
+editors confuse the agent because the MCP only talks to one of them — the
+other(s) silently keep diverging copies of every scene.
 
 ## Screenshots
 

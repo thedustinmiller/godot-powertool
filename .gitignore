@@ -108,3 +108,6 @@ doc_api/
 *.bak
 *.tmp
 references/
+
+.agents/
+.powertool.toml

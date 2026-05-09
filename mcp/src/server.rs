@@ -2,8 +2,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, Mutex as StdMutex},
+    time::{Duration, Instant},
 };
 use tokio::io::AsyncBufReadExt;
 
@@ -88,13 +88,19 @@ const DEFAULT_LSP_PORT: u16 = 6005;
 
 pub struct GodotMcpServer {
     godot_path: PathBuf,
+    canonical_godot_path: PathBuf,
     active_process: Arc<Mutex<Option<GodotProcess>>>,
     editor_process: Arc<Mutex<Option<GodotProcess>>>,
     operations_script: PathBuf,
     editor: Arc<EditorConnection>,
+    /// Cache of (last_check, warning_text). Process enumeration is rerun at
+    /// most once per `INSTANCE_CHECK_TTL` to keep tool-call overhead small.
+    instance_check: StdMutex<Option<(Instant, Option<String>)>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
+
+const INSTANCE_CHECK_TTL: Duration = Duration::from_secs(2);
 
 impl GodotMcpServer {
     pub fn new() -> Result<Self> {
@@ -120,12 +126,16 @@ impl GodotMcpServer {
             .unwrap_or(DEFAULT_EDITOR_PORT);
         let editor = Arc::new(EditorConnection::new(port));
 
+        let canonical_godot_path = godot_path.canonicalize().unwrap_or_else(|_| godot_path.clone());
+
         Ok(Self {
             godot_path,
+            canonical_godot_path,
             active_process: Arc::new(Mutex::new(None)),
             editor_process: Arc::new(Mutex::new(None)),
             operations_script,
             editor,
+            instance_check: StdMutex::new(None),
             tool_router,
         })
     }
@@ -226,6 +236,74 @@ impl GodotMcpServer {
             })?;
         }
         Ok(())
+    }
+
+    /// Count Godot processes whose `exe()` matches this server's binary path.
+    /// Returns 0 if process enumeration fails.
+    fn count_godot_processes(&self) -> usize {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::new(),
+        );
+        sys.processes()
+            .values()
+            .filter(|p| match p.exe() {
+                Some(exe) => {
+                    exe == self.canonical_godot_path
+                        || exe == self.godot_path
+                        || exe
+                            .canonicalize()
+                            .map(|c| c == self.canonical_godot_path)
+                            .unwrap_or(false)
+                }
+                None => false,
+            })
+            .count()
+    }
+
+    /// Returns a warning string when more than one Godot process is running
+    /// against this MCP's binary. Cached for `INSTANCE_CHECK_TTL` to avoid
+    /// scanning processes on every tool call.
+    fn multi_instance_warning(&self) -> Option<String> {
+        let now = Instant::now();
+        if let Ok(guard) = self.instance_check.lock() {
+            if let Some((ts, ref cached)) = *guard {
+                if now.duration_since(ts) < INSTANCE_CHECK_TTL {
+                    return cached.clone();
+                }
+            }
+        }
+
+        let count = self.count_godot_processes();
+        let warning = if count > 1 {
+            Some(format!(
+                "⚠️ WARNING: {count} Godot processes match the binary this MCP server uses ({}). \
+                 The MCP can only talk to one editor at a time, so changes may be applied to a \
+                 different instance than expected. Stop extras with stop_editor or by closing \
+                 them in the OS.",
+                self.godot_path.display()
+            ))
+        } else {
+            None
+        };
+
+        if let Ok(mut guard) = self.instance_check.lock() {
+            *guard = Some((now, warning.clone()));
+        }
+        warning
+    }
+
+    /// Build a text-only success response, prepending the multi-instance
+    /// warning when one is active. Used by every tool that returns text.
+    fn text_response(&self, text: impl Into<String>) -> CallToolResult {
+        let body = match self.multi_instance_warning() {
+            Some(w) => format!("{w}\n\n{}", text.into()),
+            None => text.into(),
+        };
+        CallToolResult::success(vec![Content::text(body)])
     }
 }
 
@@ -431,6 +509,15 @@ struct EditorTimeoutParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ReloadSceneParams {
+    /// Scene path to reload (e.g. "res://scenes/main.tscn"). If omitted,
+    /// reloads the currently edited scene.
+    path: Option<String>,
+    /// Timeout in seconds (default: 15)
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct EditorScriptParams {
     /// Path to the script file
     script_path: String,
@@ -482,7 +569,7 @@ impl GodotMcpServer {
         let version = godot_cli::get_godot_version_async(&self.godot_path, timeout)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(version)]))
+        Ok(self.text_response(version))
     }
 
     /// Launch the Godot editor for a project. Polls for WebSocket connection after spawning.
@@ -516,10 +603,10 @@ impl GodotMcpServer {
         }
 
         let status = if connected { "connected" } else { "launched (not yet connected)" };
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(self.text_response(format!(
             "Launched Godot editor for {} — {status}",
             params.project_path
-        ))]))
+        )))
     }
 
     /// Stop the Godot editor. Falls back to process search if the editor wasn't launched by this MCP instance.
@@ -529,9 +616,9 @@ impl GodotMcpServer {
         match editor.take() {
             Some(mut proc) => {
                 let _ = proc.child.kill().await;
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(self.text_response(
                     "Editor stopped",
-                )]))
+                ))
             }
             None => {
                 // Fallback: find and kill Godot editor processes by binary path
@@ -542,13 +629,13 @@ impl GodotMcpServer {
                     .output();
                 match result {
                     Ok(output) if output.status.success() => {
-                        Ok(CallToolResult::success(vec![Content::text(
+                        Ok(self.text_response(
                             "Editor stopped (found via process search)",
-                        )]))
+                        ))
                     }
-                    _ => Ok(CallToolResult::success(vec![Content::text(
+                    _ => Ok(self.text_response(
                         "No editor process found",
-                    )])),
+                    )),
                 }
             }
         }
@@ -585,10 +672,10 @@ impl GodotMcpServer {
         }
 
         let scene_info = params.scene.as_deref().unwrap_or("main scene");
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(self.text_response(format!(
             "Running {scene_info} from {}",
             params.project_path
-        ))]))
+        )))
     }
 
     /// Get debug output (stdout/stderr) from Godot processes spawned by this MCP server.
@@ -621,9 +708,9 @@ impl GodotMcpServer {
             ));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&serde_json::json!({ "sources": sources })).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Read the Godot editor log file for a project. Useful for debugging errors that don't appear in get_debug_output (e.g., editor-mode crashes, scene loading failures).
@@ -653,7 +740,7 @@ impl GodotMcpServer {
         let start = lines.len().saturating_sub(tail);
         let result = lines[start..].join("\n");
 
-        Ok(CallToolResult::success(vec![Content::text(result)]))
+        Ok(self.text_response(result))
     }
 
     /// Stop the standalone Godot scene process. Only needed if the scene was launched with run_scene_standalone.
@@ -670,13 +757,13 @@ impl GodotMcpServer {
                     "final_output": output,
                     "final_errors": errors,
                 });
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(self.text_response(
                     serde_json::to_string_pretty(&final_output).unwrap_or_default(),
-                )]))
+                ))
             }
-            None => Ok(CallToolResult::success(vec![Content::text(
+            None => Ok(self.text_response(
                 "No scene was running",
-            )])),
+            )),
         }
     }
 
@@ -715,9 +802,9 @@ impl GodotMcpServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Get detailed information about a Godot project
@@ -746,9 +833,9 @@ impl GodotMcpServer {
             "scripts": info.scripts.iter().map(|s| s.to_string_lossy().to_string()).collect::<Vec<_>>(),
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Create a new scene with a specified root node type
@@ -764,7 +851,7 @@ impl GodotMcpServer {
         });
         let timeout = Self::timeout_from(params.timeout_seconds);
         let output = self.run_operation(&project, "create_scene", &op_params, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(self.text_response(output))
     }
 
     /// Add a node to an existing scene
@@ -787,7 +874,7 @@ impl GodotMcpServer {
         }
         let timeout = Self::timeout_from(params.timeout_seconds);
         let output = self.run_operation(&project, "add_node", &op_params, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(self.text_response(output))
     }
 
     /// Load a texture into a sprite node in a scene
@@ -804,7 +891,7 @@ impl GodotMcpServer {
         });
         let timeout = Self::timeout_from(params.timeout_seconds);
         let output = self.run_operation(&project, "load_sprite", &op_params, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(self.text_response(output))
     }
 
     /// Save changes to a scene file
@@ -822,7 +909,7 @@ impl GodotMcpServer {
         }
         let timeout = Self::timeout_from(params.timeout_seconds);
         let output = self.run_operation(&project, "save_scene", &op_params, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(self.text_response(output))
     }
 
     /// Export a 3D scene as a MeshLibrary resource
@@ -841,7 +928,7 @@ impl GodotMcpServer {
         }
         let timeout = Self::timeout_from(params.timeout_seconds);
         let output = self.run_operation(&project, "export_mesh_library", &op_params, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(self.text_response(output))
     }
 
     /// Get the UID for a specific file (Godot 4.4+)
@@ -856,7 +943,7 @@ impl GodotMcpServer {
         });
         let timeout = Self::timeout_from(params.timeout_seconds);
         let output = self.run_operation(&project, "get_uid", &op_params, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(self.text_response(output))
     }
 
     /// Update UID references by resaving all resources (Godot 4.4+)
@@ -871,7 +958,7 @@ impl GodotMcpServer {
         });
         let timeout = Self::timeout_from(params.timeout_seconds);
         let output = self.run_operation(&project, "resave_resources", &op_params, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(self.text_response(output))
     }
 
     // === Editor WebSocket tools (require editor connection) ===
@@ -893,9 +980,9 @@ impl GodotMcpServer {
             p["properties"] = props.clone();
         }
         let result = self.run_via_editor("create_node", p, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Delete a node from the live editor scene tree
@@ -913,9 +1000,9 @@ impl GodotMcpServer {
                 timeout,
             )
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Update a property on a node in the live editor
@@ -937,9 +1024,9 @@ impl GodotMcpServer {
                 timeout,
             )
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Get all properties of a node in the live editor
@@ -957,9 +1044,9 @@ impl GodotMcpServer {
                 timeout,
             )
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// List child nodes of a parent in the live editor scene tree
@@ -979,12 +1066,19 @@ impl GodotMcpServer {
                 timeout,
             )
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
-    /// Open a scene in the editor
+    /// Open a scene in the editor. **Close the scene with `close_scene` when
+    /// you finish editing it** — leaving scenes open across unrelated tasks
+    /// is the main source of editor/agent confusion. If you also edit the
+    /// scene's `.tscn` file directly while it is open, call
+    /// `reload_scene_from_disk` afterward so the editor's in-memory copy
+    /// matches the file on disk (otherwise the editor's copy will overwrite
+    /// your edits on the next save and a "reload from disk?" popup will
+    /// block further work).
     #[rmcp::tool]
     async fn open_scene(
         &self,
@@ -999,9 +1093,56 @@ impl GodotMcpServer {
                 timeout,
             )
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
+    }
+
+    /// Reload an open scene from disk, discarding the editor's in-memory
+    /// copy. Use this after writing to a `.tscn` file that is currently
+    /// open in the editor — it suppresses the "scene was modified
+    /// externally" popup and ensures the editor is in sync with disk.
+    /// With no `path`, reloads the currently edited scene.
+    #[rmcp::tool]
+    async fn reload_scene_from_disk(
+        &self,
+        Parameters(params): Parameters<ReloadSceneParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor().await?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let mut payload = serde_json::Map::new();
+        if let Some(p) = params.path {
+            payload.insert("path".into(), serde_json::Value::String(p));
+        }
+        let result = self
+            .run_via_editor(
+                "reload_scene_from_disk",
+                serde_json::Value::Object(payload),
+                timeout,
+            )
+            .await?;
+        Ok(self.text_response(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        ))
+    }
+
+    /// Close the currently active scene tab in the editor. Call this when
+    /// done editing a scene so the agent doesn't accidentally apply later
+    /// changes to it. **Discards** unsaved in-editor changes — call
+    /// `save_scene` first if needed.
+    #[rmcp::tool]
+    async fn close_scene(
+        &self,
+        Parameters(params): Parameters<EditorTimeoutParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.require_editor().await?;
+        let timeout = Self::timeout_from(params.timeout_seconds);
+        let result = self
+            .run_via_editor("close_scene", serde_json::json!({}), timeout)
+            .await?;
+        Ok(self.text_response(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        ))
     }
 
     /// Get info about the currently open scene in the editor
@@ -1015,9 +1156,9 @@ impl GodotMcpServer {
         let result = self
             .run_via_editor("get_current_scene", serde_json::json!({}), timeout)
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Get the full scene tree structure of the currently open scene
@@ -1031,9 +1172,9 @@ impl GodotMcpServer {
         let result = self
             .run_via_editor("get_scene_structure", serde_json::json!({}), timeout)
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Create a new GDScript file via the editor
@@ -1052,9 +1193,9 @@ impl GodotMcpServer {
             p["node_path"] = serde_json::json!(n);
         }
         let result = self.run_via_editor("create_script", p, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Edit an existing GDScript file via the editor
@@ -1075,9 +1216,9 @@ impl GodotMcpServer {
                 timeout,
             )
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Get a script's content via the editor
@@ -1096,9 +1237,9 @@ impl GodotMcpServer {
             p["node_path"] = serde_json::json!(np);
         }
         let result = self.run_via_editor("get_script", p, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Get the current editor state (open scene, selection, playing status)
@@ -1112,9 +1253,9 @@ impl GodotMcpServer {
         let result = self
             .run_via_editor("get_editor_state", serde_json::json!({}), timeout)
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Get the currently selected node in the editor
@@ -1128,9 +1269,9 @@ impl GodotMcpServer {
         let result = self
             .run_via_editor("get_selected_node", serde_json::json!({}), timeout)
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Execute arbitrary GDScript code in the editor context
@@ -1148,9 +1289,9 @@ impl GodotMcpServer {
                 timeout,
             )
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Run a scene via the Godot editor. Requires the editor to be running with the PowerTool addon. If no scene path is given, runs the project's main scene.
@@ -1172,9 +1313,9 @@ impl GodotMcpServer {
             p["scene"] = serde_json::json!(scene);
         }
         let result = self.run_via_editor("run_scene", p, timeout).await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Discover scripts referenced by a scene + project autoloads, validate them
@@ -1318,9 +1459,9 @@ impl GodotMcpServer {
         let result = self
             .run_via_editor("stop_scene", serde_json::json!({}), timeout)
             .await?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 
     /// Take a screenshot of the running game viewport or editor viewport. Requires the editor to be running with the PowerTool addon. Use pause_first=true for CPU-heavy scenes where the debugger channel may be starved.
@@ -1357,19 +1498,21 @@ impl GodotMcpServer {
                     .map_err(|e| ErrorData::internal_error(format!("Base64 decode error: {e}"), None))?;
                 fs::write(save_path, &data)
                     .map_err(|e| ErrorData::internal_error(format!("Failed to save: {e}"), None))?;
-                return Ok(CallToolResult::success(vec![Content::text(format!(
+                return Ok(self.text_response(format!(
                     "Screenshot saved to: {save_path}"
-                ))]));
+                )));
             }
-            return Ok(CallToolResult::success(vec![Content::image(
-                b64.to_string(),
-                "image/png",
-            )]));
+            let mut blocks = Vec::new();
+            if let Some(w) = self.multi_instance_warning() {
+                blocks.push(Content::text(w));
+            }
+            blocks.push(Content::image(b64.to_string(), "image/png"));
+            return Ok(CallToolResult::success(blocks));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(self.text_response(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
-        )]))
+        ))
     }
 }
 

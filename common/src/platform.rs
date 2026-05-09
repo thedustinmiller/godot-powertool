@@ -27,9 +27,31 @@ impl HostPlatform {
     }
 }
 
+/// Per-host subdirectory name used under `tools/godot/` so that side-by-side
+/// setups (e.g. WSL Linux + native Windows on the same checkout) keep separate
+/// binaries instead of clobbering each other.
+pub fn tools_subdir_name() -> String {
+    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// Filename for the normalized Godot binary inside the per-host subdir.
+pub fn local_godot_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") { "godot.exe" } else { "godot" }
+}
+
+/// Path to the project-local Godot binary for the current host:
+/// `<root>/tools/godot/<arch>-<os>/godot[.exe]`.
+pub fn local_godot_binary_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join("tools")
+        .join("godot")
+        .join(tools_subdir_name())
+        .join(local_godot_binary_name())
+}
+
 /// Find the Godot binary, checking multiple sources in priority order:
 /// 1. `GODOT_PATH` environment variable
-/// 2. Project-local `tools/godot/godot` (if project_root provided)
+/// 2. Project-local `tools/godot/<arch>-<os>/godot[.exe]` (if project_root provided)
 /// 3. `godot` on system PATH
 /// 4. Platform-specific well-known locations
 pub fn find_godot_binary(project_root: Option<&Path>) -> Result<PathBuf> {
@@ -41,11 +63,17 @@ pub fn find_godot_binary(project_root: Option<&Path>) -> Result<PathBuf> {
         }
     }
 
-    // 2. Project-local tools directory
+    // 2. Project-local tools directory (per-host subdir)
     if let Some(root) = project_root {
-        let local = root.join("tools").join("godot").join("godot");
+        let local = local_godot_binary_path(root);
         if local.exists() {
             return Ok(local);
+        }
+        // Backwards-compat: pre-multi-platform layout. Re-running
+        // `cargo xtask setup` migrates to the per-host subdir.
+        let legacy = root.join("tools").join("godot").join("godot");
+        if legacy.exists() {
+            return Ok(legacy);
         }
     }
 

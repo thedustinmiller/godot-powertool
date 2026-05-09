@@ -18,3 +18,4 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 uuid.workspace = true
 schemars = "1.2"
+sysinfo.workspace = true

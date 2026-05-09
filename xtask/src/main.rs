@@ -25,7 +25,7 @@ use powertool_common::{
     config::{ExtensionConfig, load_template_config},
     platform::{
         extension_lib_name, extension_platform_dir, find_godot_binary, godot_download_info,
-        open_path,
+        local_godot_binary_name, open_path, tools_subdir_name,
     },
     skill::SkillTarget,
 };
@@ -1178,15 +1178,17 @@ fn cmd_update(assets: &[powertool_common::config::Asset]) -> Result<()> {
 }
 
 fn download_godot(version: &str, tools_dir: &Path) -> Result<()> {
-    let godot_dir = tools_dir.join("godot");
-    let stamp_path = godot_dir.join(".version");
+    // Per-host install layout: tools/godot/<arch>-<os>/godot[.exe] so WSL +
+    // native Windows on the same checkout don't overwrite each other.
+    let host_dir = tools_dir.join("godot").join(tools_subdir_name());
+    let stamp_path = host_dir.join(".version");
 
     // Version-aware skip: only skip if the installed version matches
     if let Ok(installed) = fs::read_to_string(&stamp_path) {
         if installed.trim() == version {
             println!(
                 "Godot {version} already installed at {}",
-                godot_dir.display()
+                host_dir.display()
             );
             return Ok(());
         }
@@ -1194,7 +1196,7 @@ fn download_godot(version: &str, tools_dir: &Path) -> Result<()> {
             "Godot version changed ({} -> {version}), re-downloading...",
             installed.trim()
         );
-        fs::remove_dir_all(&godot_dir)?;
+        fs::remove_dir_all(&host_dir)?;
     }
 
     println!("Downloading Godot {version}...");
@@ -1204,14 +1206,14 @@ fn download_godot(version: &str, tools_dir: &Path) -> Result<()> {
     let bytes = download_zip(&url)?;
 
     println!("Extracting Godot...");
-    fs::create_dir_all(&godot_dir)?;
+    fs::create_dir_all(&host_dir)?;
 
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor)?;
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        let outpath = godot_dir.join(file.name());
+        let outpath = host_dir.join(file.name());
 
         if file.name().ends_with('/') {
             fs::create_dir_all(&outpath)?;
@@ -1224,10 +1226,10 @@ fn download_godot(version: &str, tools_dir: &Path) -> Result<()> {
         }
     }
 
-    let extracted = godot_dir.join(&binary_name);
-    let final_path = godot_dir.join("godot");
+    let extracted = host_dir.join(&binary_name);
+    let final_path = host_dir.join(local_godot_binary_name());
 
-    if extracted.exists() {
+    if extracted.exists() && extracted != final_path {
         fs::rename(&extracted, &final_path)?;
     }
 

@@ -13,6 +13,12 @@ func process_command(peer_id: int, command_type: String, params: Dictionary, com
 		"save_scene":
 			_save_scene(peer_id, params, command_id)
 			return true
+		"reload_scene_from_disk":
+			_reload_scene_from_disk(peer_id, params, command_id)
+			return true
+		"close_scene":
+			_close_scene(peer_id, params, command_id)
+			return true
 		"get_current_scene":
 			_get_current_scene(peer_id, params, command_id)
 			return true
@@ -87,6 +93,55 @@ func _open_scene(peer_id: int, params: Dictionary, command_id: String) -> void:
 	ei.open_scene_from_path(path)
 
 	_send_success(peer_id, {"scene_path": path}, command_id)
+
+
+## Reload a scene from disk in the editor — fixes the "scene was modified
+## externally, reload from disk?" popup that appears after editing a .tscn
+## file directly while it is open in the editor.
+##
+## With no `path` param, reloads the currently edited scene. The path must
+## refer to a scene that is currently open in the editor (Godot only reloads
+## scenes from the open-tab list).
+func _reload_scene_from_disk(peer_id: int, params: Dictionary, command_id: String) -> void:
+	var ei = _get_editor_interface()
+	if not ei:
+		return _send_error(peer_id, "EditorInterface not available", command_id)
+
+	var path: String = params.get("path", "")
+	if path.is_empty():
+		var root := _get_edited_scene_root()
+		if not root:
+			return _send_error(peer_id, "No scene is currently being edited", command_id, "NO_SCENE")
+		path = root.scene_file_path
+		if path.is_empty():
+			return _send_error(peer_id, "Edited scene has no path on disk yet", command_id, "INVALID_PARAMS")
+
+	if not path.begins_with("res://"):
+		path = "res://" + path
+
+	if not FileAccess.file_exists(path):
+		return _send_error(peer_id, "Scene file not found: %s" % path, command_id, "INVALID_PARAMS")
+
+	ei.reload_scene_from_path(path)
+	_send_success(peer_id, {"scene_path": path}, command_id)
+
+
+## Close the currently active scene tab in the editor. Discards any pending
+## in-editor changes — callers should `save_scene` first if they want to keep
+## edits made via the live editor that haven't been persisted.
+func _close_scene(peer_id: int, _params: Dictionary, command_id: String) -> void:
+	var ei = _get_editor_interface()
+	if not ei:
+		return _send_error(peer_id, "EditorInterface not available", command_id)
+
+	var root := _get_edited_scene_root()
+	var prev_path := root.scene_file_path if root else ""
+
+	var err := ei.close_scene()
+	if err != OK:
+		return _send_error(peer_id, "Failed to close scene: %s" % error_string(err), command_id)
+
+	_send_success(peer_id, {"closed_scene_path": prev_path}, command_id)
 
 
 func _save_scene(peer_id: int, params: Dictionary, command_id: String) -> void:
